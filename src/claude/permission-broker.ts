@@ -34,11 +34,14 @@ export interface PermissionRequest {
 export type PermissionResponse =
   | { behavior: "allow" }
   | { behavior: "deny"; message: string }
-  | { behavior: "allow_turn" }
-  | { behavior: "allow_session" };
+  | { behavior: "allow_turn" };
 
-/** Choice value encoded on each permission card button. */
-export type CardChoice = "allow" | "deny" | "allow_turn" | "allow_session";
+/**
+ * Choice value encoded on each permission card button.
+ * COREBYTE hardening: `allow_session` (sticky session-wide acceptEdits)
+ * has been removed.
+ */
+export type CardChoice = "allow" | "deny" | "allow_turn";
 
 /** Result of routing a `card.action.trigger` event to the broker. */
 export type CardActionResult =

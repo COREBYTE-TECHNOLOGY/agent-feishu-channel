@@ -7,7 +7,7 @@ import {
 } from "../../../../src/feishu/cards/permission-card.js";
 
 describe("buildPermissionCard (pending)", () => {
-  it("renders header with toolName and 4 buttons each tagged with the request_id", () => {
+  it("renders header with toolName and 3 buttons (no allow_session) each tagged with the request_id", () => {
     const card = buildPermissionCard({
       requestId: "req_abc",
       toolName: "Bash",
@@ -29,11 +29,13 @@ describe("buildPermissionCard (pending)", () => {
       if (Array.isArray(e.columns)) e.columns.forEach(walk);
     }
     card.body?.elements.forEach(walk);
-    expect(buttons).toHaveLength(4);
+    expect(buttons).toHaveLength(3);
     const choices = buttons.map((b) => b.choice);
     expect(choices).toEqual(
-      expect.arrayContaining(["allow", "deny", "allow_turn", "allow_session"]),
+      expect.arrayContaining(["allow", "deny", "allow_turn"]),
     );
+    expect(choices).not.toContain("allow_session");
+    expect(JSON.stringify(card)).not.toMatch(/会话.*acceptEdits/);
     for (const b of buttons) {
       expect(b.kind).toBe("permission");
       expect(b.request_id).toBe("req_abc");
@@ -100,14 +102,6 @@ describe("buildPermissionCardResolved", () => {
     expect(JSON.stringify(card)).toMatch(/本轮.*acceptEdits/);
   });
 
-  it("labels the allow_session variant", () => {
-    const card = buildPermissionCardResolved({
-      toolName: "Bash",
-      choice: "allow_session",
-      locale: "zh",
-    });
-    expect(JSON.stringify(card)).toMatch(/会话.*acceptEdits/);
-  });
 });
 
 describe("buildPermissionCardCancelled", () => {

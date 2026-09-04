@@ -1,10 +1,8 @@
 import type { ReasoningEffort } from "../types.js";
 
-export type PermissionMode =
-  | "default"
-  | "acceptEdits"
-  | "plan"
-  | "bypassPermissions";
+// COREBYTE hardening: `bypassPermissions` is not parseable — `/mode
+// bypassPermissions` is an unknown_command.
+export type PermissionMode = "default" | "acceptEdits" | "plan";
 
 export type ParsedCommand =
   | { name: "provider"; provider: "claude" | "codex" }
@@ -50,12 +48,7 @@ export type CommandRouterResult =
   | { kind: "command"; cmd: ParsedCommand }
   | { kind: "unknown_command"; raw: string };
 
-const VALID_MODES = new Set<string>([
-  "default",
-  "acceptEdits",
-  "plan",
-  "bypassPermissions",
-]);
+const VALID_MODES = new Set<string>(["default", "acceptEdits", "plan"]);
 
 const VALID_EFFORTS = new Set<string>([
   "minimal",

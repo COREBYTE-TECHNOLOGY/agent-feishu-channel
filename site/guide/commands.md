@@ -110,10 +110,9 @@ Sets the permission mode for the current session. Available modes:
 | `default` | Tool calls post a permission card in the Feishu group; only the triggering user can approve |
 | `acceptEdits` | Auto-approve file edits; shell commands still require approval via permission card |
 | `plan` | Plan mode, read-only |
-| `bypassPermissions` | Auto-approve everything; permission broker disabled |
 
 ::: warning
-`bypassPermissions` gives the current provider unrestricted shell and file access. Use with caution.
+`bypassPermissions` has been removed in the COREBYTE hardened fork. The permission broker can never be disabled from the bot.
 :::
 
 ### `/model <name>`

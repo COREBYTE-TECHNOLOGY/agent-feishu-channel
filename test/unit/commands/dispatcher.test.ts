@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -42,14 +43,19 @@ const BASE_CONFIG: AppConfig = {
     appSecret: "secret_test_value",
     encryptKey: "enc_key",
     verificationToken: "vt_token",
+    domain: "lark",
   },
   access: {
     allowedOpenIds: ["ou_alice"],
+    allowedChatIds: ["oc_1"],
     unauthorizedBehavior: "ignore",
   },
   agent: {
     defaultProvider: "claude",
     defaultCwd: "/tmp/cfc-test",
+    // Most legacy tests below `/cd /tmp` from a default_cwd of /tmp/cfc-test;
+    // the lock is exercised explicitly in the "locked cwd" describe block.
+    lockedCwd: false,
     defaultPermissionMode: "default",
     permissionTimeoutMs: 300_000,
     permissionWarnBeforeMs: 60_000,
@@ -416,13 +422,13 @@ describe("CommandDispatcher — /mode", () => {
     await flushMicrotasks();
     expect(session.getState()).toBe("generating");
 
-    await dispatcher.dispatch({ name: "mode", mode: "bypassPermissions" }, CTX);
+    await dispatcher.dispatch({ name: "mode", mode: "plan" }, CTX);
 
     expect(feishu.replyText).toHaveBeenCalledOnce();
     const text: string = (feishu.replyText as ReturnType<typeof vi.fn>).mock.calls[0]![1];
     expect(text).toContain("执行中");
-    // Mode should NOT have been changed to bypassPermissions
-    expect(session.getStatus().permissionMode).not.toBe("bypassPermissions");
+    // Mode should NOT have been changed to plan
+    expect(session.getStatus().permissionMode).not.toBe("plan");
   });
 });
 
@@ -1263,5 +1269,157 @@ describe("CommandDispatcher — /config set", () => {
     const text: string = (feishu.replyText as ReturnType<typeof vi.fn>).mock.calls[0]![1];
     // In test harness, configPath is undefined so it shows skip message
     expect(text).toContain("已更新");
+  });
+});
+
+describe("CommandDispatcher — locked cwd (COREBYTE hardening)", () => {
+  function makeLockedHarness(root: string) {
+    return makeHarness({
+      agent: { ...BASE_CONFIG.agent, defaultCwd: root, lockedCwd: true },
+      claude: { ...BASE_CONFIG.claude, defaultCwd: root },
+    });
+  }
+
+  it("/cd refuses a path outside default_cwd without touching the filesystem", async () => {
+    const root = mkdtempSync(join(tmpdir(), "afc-lock-"));
+    try {
+      const { feishu, dispatcher } = makeLockedHarness(root);
+
+      await dispatcher.dispatch({ name: "cd", path: "/tmp" }, CTX);
+
+      expect(feishu.replyCard).not.toHaveBeenCalled();
+      expect(feishu.replyText).toHaveBeenCalledOnce();
+      const text: string = (feishu.replyText as ReturnType<typeof vi.fn>).mock.calls[0]![1];
+      expect(text).toContain("锁定");
+      expect(text).toContain(root);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("/cd refuses a `..` escape that lexically starts with default_cwd", async () => {
+    const root = mkdtempSync(join(tmpdir(), "afc-lock-"));
+    try {
+      const { feishu, dispatcher } = makeLockedHarness(root);
+
+      await dispatcher.dispatch({ name: "cd", path: join(root, "..") }, CTX);
+
+      expect(feishu.replyCard).not.toHaveBeenCalled();
+      expect(feishu.replyText).toHaveBeenCalledOnce();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("/cd refuses a sibling directory sharing default_cwd as a string prefix", async () => {
+    const root = mkdtempSync(join(tmpdir(), "afc-lock-"));
+    const sibling = `${root}-evil`;
+    mkdirSync(sibling, { recursive: true });
+    try {
+      const { feishu, dispatcher } = makeLockedHarness(root);
+
+      await dispatcher.dispatch({ name: "cd", path: sibling }, CTX);
+
+      expect(feishu.replyCard).not.toHaveBeenCalled();
+      expect(feishu.replyText).toHaveBeenCalledOnce();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(sibling, { recursive: true, force: true });
+    }
+  });
+
+  it("/cd allows default_cwd itself and a subdirectory (confirm card is sent)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "afc-lock-"));
+    const sub = join(root, "svc");
+    mkdirSync(sub, { recursive: true });
+    try {
+      const { feishu, dispatcher } = makeLockedHarness(root);
+
+      await dispatcher.dispatch({ name: "cd", path: sub }, CTX);
+      await dispatcher.dispatch({ name: "cd", path: root }, CTX);
+
+      expect(feishu.replyText).not.toHaveBeenCalled();
+      expect(feishu.replyCard).toHaveBeenCalledTimes(2);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("/cd outside default_cwd is allowed again when locked_cwd = false", async () => {
+    const root = mkdtempSync(join(tmpdir(), "afc-lock-"));
+    try {
+      const { feishu, dispatcher } = makeHarness({
+        agent: { ...BASE_CONFIG.agent, defaultCwd: root, lockedCwd: false },
+        claude: { ...BASE_CONFIG.claude, defaultCwd: root },
+      });
+
+      await dispatcher.dispatch({ name: "cd", path: "/tmp" }, CTX);
+
+      expect(feishu.replyCard).toHaveBeenCalledOnce();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("/config set refuses *default_cwd keys while locked", async () => {
+    const { feishu, dispatcher, config } = makeHarness({
+      agent: { ...BASE_CONFIG.agent, lockedCwd: true },
+    });
+    // Snapshot: earlier /config set tests mutate the shared BASE_CONFIG
+    // sub-objects in place, so compare against the pre-call values.
+    const agentCwdBefore = config.agent.defaultCwd;
+    const claudeCwdBefore = config.claude.defaultCwd;
+
+    await dispatcher.dispatch(
+      { name: "config_set", key: "agent.default_cwd", value: "/", persist: false },
+      CTX,
+    );
+    await dispatcher.dispatch(
+      { name: "config_set", key: "claude.default_cwd", value: "/", persist: false },
+      CTX,
+    );
+
+    expect(feishu.replyText).toHaveBeenCalledTimes(2);
+    for (const call of (feishu.replyText as ReturnType<typeof vi.fn>).mock.calls) {
+      expect(call[1]).toContain("不允许在运行时修改");
+    }
+    expect(config.agent.defaultCwd).toBe(agentCwdBefore);
+    expect(config.claude.defaultCwd).toBe(claudeCwdBefore);
+    expect(config.agent.defaultCwd).not.toBe("/");
+  });
+});
+
+describe("CommandDispatcher — permission mode hardening (COREBYTE)", () => {
+  it.each([
+    "agent.default_permission_mode",
+    "claude.default_permission_mode",
+    "codex.default_permission_mode",
+  ])("/config set %s is refused and leaves config untouched", async (key) => {
+    const { feishu, dispatcher, config } = makeHarness();
+
+    await dispatcher.dispatch(
+      { name: "config_set", key, value: "acceptEdits", persist: false },
+      CTX,
+    );
+
+    expect(feishu.replyText).toHaveBeenCalledOnce();
+    const text: string = (feishu.replyText as ReturnType<typeof vi.fn>).mock.calls[0]![1];
+    expect(text).toContain("不允许在运行时修改");
+    expect(config.agent.defaultPermissionMode).toBe("default");
+    expect(config.claude.defaultPermissionMode).toBe("default");
+    expect(config.codex.defaultPermissionMode).toBe("default");
+  });
+
+  it("/config show never lists a permission-mode key as settable", async () => {
+    const { feishu, dispatcher } = makeHarness();
+
+    await dispatcher.dispatch(
+      { name: "config_set", key: "render.nope", value: "1", persist: false },
+      CTX,
+    );
+
+    const text: string = (feishu.replyText as ReturnType<typeof vi.fn>).mock.calls[0]![1];
+    expect(text).toContain("可设置的配置项");
+    expect(text).not.toContain("permission_mode");
   });
 });

@@ -250,10 +250,9 @@ export class ClaudeSession {
 
   /**
    * When true, subsequent turns run with `permissionMode: "acceptEdits"`
-   * regardless of the configured default. Set by the session's canUseTool
-   * closure when the user clicks "会话 acceptEdits" on a permission card.
-   * Cleared only on process restart (Phase 5 scope) — Phase 6's `/new`
-   * and `/mode default` commands will clear it too.
+   * regardless of the configured default. COREBYTE hardening: only the
+   * explicit `/mode acceptEdits` command sets this (via
+   * `setPermissionModeOverride`); permission cards can no longer flip it.
    */
   private sessionAcceptEditsSticky = false;
 
@@ -1314,11 +1313,11 @@ export class ClaudeSession {
         case "deny":
           return { behavior: "deny", message: response.message };
         case "allow_turn":
+          // Turn-scoped only: flips the *current* SDK query to acceptEdits.
+          // The next turn recomputes its mode from config / `/mode`
+          // override — `sessionAcceptEditsSticky` is never set from a card
+          // click in the COREBYTE fork (the `allow_session` button is gone).
           this.currentTurn?.handle.setPermissionMode("acceptEdits");
-          return { behavior: "allow" };
-        case "allow_session":
-          this.currentTurn?.handle.setPermissionMode("acceptEdits");
-          this.sessionAcceptEditsSticky = true;
           return { behavior: "allow" };
       }
     };

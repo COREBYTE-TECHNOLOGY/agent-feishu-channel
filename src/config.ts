@@ -1,6 +1,6 @@
 import { readFile, writeFile, rename } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { parse as parseToml, stringify as stringifyToml } from "smol-toml";
 import { z } from "zod";
 import type { AppConfig } from "./types.js";
@@ -17,19 +17,23 @@ const FeishuSchema = z.object({
   app_secret: z.string().min(1),
   encrypt_key: z.string().default(""),
   verification_token: z.string().default(""),
+  // COREBYTE fork: default to Lark international (open.larksuite.com).
+  domain: z.enum(["feishu", "lark"]).default("lark"),
 });
 
 const AccessSchema = z.object({
   allowed_open_ids: z.array(z.string().min(1)),
+  // COREBYTE hardening: required and non-empty. The bot only reacts to
+  // events originating from these chat_ids.
+  allowed_chat_ids: z
+    .array(z.string().min(1))
+    .min(1, "at least one chat_id is required"),
   unauthorized_behavior: z.enum(["ignore", "reject"]).default("ignore"),
 });
 
-const PermissionModeSchema = z.enum([
-  "default",
-  "acceptEdits",
-  "plan",
-  "bypassPermissions",
-]);
+// COREBYTE hardening: `bypassPermissions` removed on purpose — a config that
+// still carries it fails validation instead of silently disabling the broker.
+const PermissionModeSchema = z.enum(["default", "acceptEdits", "plan"]);
 
 const ClaudeEffortSchema = z.enum(["low", "medium", "high", "xhigh", "max"]);
 const CodexEffortSchema = z.enum([
@@ -43,6 +47,8 @@ const CodexEffortSchema = z.enum([
 const AgentSchema = z.object({
   default_provider: z.enum(["claude", "codex"]).default("claude"),
   default_cwd: z.string().min(1).optional(),
+  // COREBYTE hardening: lock /cd and [projects] to default_cwd.
+  locked_cwd: z.boolean().default(true),
   default_permission_mode: PermissionModeSchema.optional(),
   permission_timeout_seconds: z.number().int().positive().optional(),
   permission_warn_before_seconds: z.number().int().positive().optional(),
@@ -146,6 +152,33 @@ function expandHome(path: string): string {
   return path;
 }
 
+/**
+ * COREBYTE hardening: true when `target` resolves to `base` itself or to a
+ * path strictly inside `base`. Both sides go through `path.resolve`, so
+ * `..` segments and trailing slashes cannot escape. Symlinks are NOT
+ * followed here — this is a lexical check on the configured strings.
+ */
+export function isWithinDirectory(base: string, target: string): boolean {
+  const root = resolve(base);
+  const candidate = resolve(target);
+  if (candidate === root) return true;
+  const prefix = root.endsWith(sep) ? root : root + sep;
+  return candidate.startsWith(prefix);
+}
+
+function validateLockedProjects(
+  path: string,
+  defaultCwd: string,
+  projects: Record<string, string>,
+): void {
+  const offenders = Object.entries(projects)
+    .filter(([, cwd]) => !isWithinDirectory(defaultCwd, cwd))
+    .map(([alias, cwd]) => `  - projects.${alias}: ${cwd} is outside agent.default_cwd (${defaultCwd}); set agent.locked_cwd = false to allow`);
+  if (offenders.length > 0) {
+    throw new ConfigError(`Invalid config at ${path}:\n${offenders.join("\n")}`);
+  }
+}
+
 function formatZodError(error: z.ZodError): string {
   return error.issues
     .map((issue) => `  - ${issue.path.join(".")}: ${issue.message}`)
@@ -224,7 +257,8 @@ export async function writeConfigKey(
 
   const toml = stringifyToml(parsed);
   const tmpPath = configPath + ".tmp";
-  await writeFile(tmpPath, toml, "utf8");
+  // COREBYTE hardening: config holds app_secret — owner-only permissions.
+  await writeFile(tmpPath, toml, { encoding: "utf8", mode: 0o600 });
   await rename(tmpPath, configPath);
 }
 
@@ -263,8 +297,10 @@ export async function loadConfig(path: string): Promise<AppConfig> {
   }
   const agent = data.agent ?? {
     default_provider: "claude" as const,
+    locked_cwd: true,
   };
   const agentDefaultCwd = agent.default_cwd ?? data.claude.default_cwd;
+  const lockedCwd = agent.locked_cwd ?? true;
   const agentDefaultPermissionMode =
     agent.default_permission_mode ?? data.claude.default_permission_mode;
   const agentPermissionTimeoutSeconds =
@@ -308,20 +344,29 @@ export async function loadConfig(path: string): Promise<AppConfig> {
   )
     ? data.claude.permission_warn_before_seconds
     : agentPermissionWarnBeforeSeconds;
+  const projects = Object.fromEntries(
+    Object.entries(data.projects ?? {}).map(([k, v]) => [k, expandHome(v)]),
+  );
+  if (lockedCwd) {
+    validateLockedProjects(path, requireDefaultCwd(), projects);
+  }
   return {
     feishu: {
       appId: data.feishu.app_id,
       appSecret: data.feishu.app_secret,
       encryptKey: data.feishu.encrypt_key,
       verificationToken: data.feishu.verification_token,
+      domain: data.feishu.domain,
     },
     access: {
       allowedOpenIds: data.access.allowed_open_ids,
+      allowedChatIds: data.access.allowed_chat_ids,
       unauthorizedBehavior: data.access.unauthorized_behavior,
     },
     agent: {
       defaultProvider: agent.default_provider,
       defaultCwd: requireDefaultCwd(),
+      lockedCwd,
       defaultPermissionMode: agentDefaultPermissionMode,
       permissionTimeoutMs: agentPermissionTimeoutSeconds * 1000,
       permissionWarnBeforeMs: agentPermissionWarnBeforeSeconds * 1000,
@@ -354,9 +399,7 @@ export async function loadConfig(path: string): Promise<AppConfig> {
     logging: {
       level: data.logging.level,
     },
-    projects: Object.fromEntries(
-      Object.entries(data.projects ?? {}).map(([k, v]) => [k, expandHome(v)]),
-    ),
+    projects,
     mcp: data.mcp.map((server) => ({
       name: server.name,
       type: server.type,

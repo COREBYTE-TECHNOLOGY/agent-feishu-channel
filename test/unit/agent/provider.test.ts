@@ -6,6 +6,7 @@ const CONFIG: Parameters<typeof getProviderDefaults>[0] &
   agent: {
     defaultProvider: "claude",
     defaultCwd: "/tmp/cfc-test",
+    lockedCwd: true,
     defaultPermissionMode: "default",
     permissionTimeoutMs: 300_000,
     permissionWarnBeforeMs: 60_000,

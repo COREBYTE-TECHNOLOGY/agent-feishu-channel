@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -28,6 +28,12 @@ const EMPTY_STATE: State = {
 };
 
 describe("StateStore", () => {
+  it("save() writes state.json owner-only (0600) — COREBYTE hardening", async () => {
+    const store = new StateStore(statePath);
+    await store.save(EMPTY_STATE);
+    expect(statSync(statePath).mode & 0o777).toBe(0o600);
+  });
+
   it("load() returns initial state when file does not exist", async () => {
     const store = new StateStore(statePath);
     const state = await store.load();

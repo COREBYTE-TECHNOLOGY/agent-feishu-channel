@@ -1,12 +1,20 @@
-# agent-feishu-channel configuration file.
+# agent-feishu-channel configuration file — COREBYTE hardened fork.
 #
 # Copy this file to ~/.agent-feishu-channel/config.toml and fill in the
-# values for your Feishu bot. Or set AGENT_FEISHU_CONFIG to point at a
+# values for your Lark bot. Or set AGENT_FEISHU_CONFIG to point at a
 # custom location. (Legacy alias CLAUDE_FEISHU_CONFIG is still honored.)
+#
+# `afc init` writes this file with mode 0600. Keep it that way — it holds
+# app_secret.
 
-# ─── Feishu app credentials ──────────────────────────────────────────
+# ─── Lark / Feishu app credentials ───────────────────────────────────
 [feishu]
-# Get these from https://open.feishu.cn/app -> your app -> Credentials
+# Which API domain to use. This fork defaults to Lark international:
+#   "lark"   — https://open.larksuite.com (default)
+#   "feishu" — https://open.feishu.cn
+domain = "lark"
+
+# Get these from https://open.larksuite.com/app -> your app -> Credentials
 app_id = "cli_xxxxxxxxxxxxxxxx"
 app_secret = "xxxxxxxxxxxxxxxxxxxxxxxxxx"
 
@@ -28,6 +36,15 @@ allowed_open_ids = [
 # "reject" = reply with an error (noisy; reveals bot exists)
 unauthorized_behavior = "ignore"
 
+# REQUIRED (COREBYTE hardening): chat allowlist. Messages and card clicks
+# from any other chat_id are dropped before the open_id check, so even an
+# allowed user cannot drive the bot from a chat that is not listed here.
+# Find a chat_id in the bot logs (logging.level = "debug") or via the Lark
+# API explorer. Must contain at least one entry.
+allowed_chat_ids = [
+  "oc_your_group_chat_id_here",
+]
+
 # ─── Agent defaults ──────────────────────────────────────────────────
 [agent]
 # Which provider new sessions should use by default.
@@ -38,16 +55,23 @@ default_provider = "claude"
 # changed via /cd or /project.
 default_cwd = "~/my-projects"
 
+# COREBYTE hardening: when true (default), /cd may only target default_cwd
+# or a directory inside it, and every [projects] alias must resolve inside
+# default_cwd (checked at startup). /config set of any *default_cwd key is
+# refused while locked.
+locked_cwd = true
+
 # Shared fallback permission mode for new sessions. Prefer setting provider-
 # specific values under [claude] and [codex] when they differ. Options:
-#   default            — Phase 5 ACTIVE: tool calls post a permission
-#                        card to the Feishu group; only the user who
-#                        sent the triggering message can click.
+#   default            — tool calls post a permission card to the chat;
+#                        only the user who sent the triggering message
+#                        can click.
 #   acceptEdits        — auto-approve file edits, prompt for shell
 #                        via the permission card
 #   plan               — plan mode, read-only
-#   bypassPermissions  — auto-approve everything, broker disabled
-#                        (Phase 4 legacy; prints a warn on startup)
+# `bypassPermissions` has been REMOVED in this fork: a config that still
+# contains it fails validation, and Codex can never run with
+# approvalPolicy = never / sandbox = danger-full-access.
 default_permission_mode = "default"
 
 # ─── Claude provider ─────────────────────────────────────────────────
@@ -119,16 +143,19 @@ level = "info"
 # ─── Runtime-settable keys ───────────────────────────────────────────
 # The following keys can be changed at runtime via /config set:
 #   render.hide_thinking, render.show_turn_stats, render.inline_max_bytes,
-#   logging.level, agent.default_provider, agent.default_cwd,
-#   agent.default_permission_mode, agent.permission_timeout_seconds,
-#   agent.permission_warn_before_seconds, claude.default_model,
-#   claude.default_effort, claude.default_permission_mode,
+#   logging.level, agent.default_provider,
+#   agent.permission_timeout_seconds, agent.permission_warn_before_seconds,
+#   claude.default_model, claude.default_effort,
 #   claude.permission_timeout_seconds, claude.permission_warn_before_seconds,
-#   codex.default_model, codex.default_effort, codex.default_permission_mode
+#   codex.default_model, codex.default_effort
+# COREBYTE hardening: *_permission_mode keys are never settable at runtime;
+# agent.default_cwd / claude.default_cwd are refused while locked_cwd = true.
 # Use /config set <key> <value> --persist to write changes back to this file.
 
 # ─── Project aliases ─────────────────────────────────────────────────
 # Aliases for /project command — quickly switch cwd by name.
+# With agent.locked_cwd = true every path here must live inside
+# agent.default_cwd, otherwise startup fails.
 # [projects]
 # my-app = "~/projects/my-app"
 # infra = "~/projects/infrastructure"

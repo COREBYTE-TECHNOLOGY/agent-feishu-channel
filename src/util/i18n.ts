@@ -45,12 +45,10 @@ const STRINGS = {
     permBtnAllow: "✅ 允许",
     permBtnDeny: "❌ 拒绝",
     permBtnAllowTurn: "✅ 本轮 acceptEdits",
-    permBtnAllowSession: "✅ 会话 acceptEdits",
     permFooter: "只有发起者可点击 · 5 分钟未响应自动拒绝",
     permResolvedAllow: "允许",
     permResolvedDeny: "拒绝",
     permResolvedAllowTurn: "本轮 acceptEdits",
-    permResolvedAllowSession: "会话 acceptEdits",
     permCancelled: (tool: string, reason: string) =>
       `🛑 已取消 \`${tool}\`（${reason}）`,
     permTimedOut: (tool: string) => `⏰ 已超时 \`${tool}\``,
@@ -99,7 +97,7 @@ const STRINGS = {
     helpProjects: "  /projects       — 查看所有已配置项目",
     helpSectionMode: "模型与权限",
     helpProvider: "  /provider <claude|codex> — 切换当前会话提供方",
-    helpMode: "  /mode <模式>  — 设置权限模式（default / acceptEdits / plan / bypassPermissions）",
+    helpMode: "  /mode <模式>  — 设置权限模式（default / acceptEdits / plan）",
     helpModel: "  /model <名称> — 切换当前 provider 的模型",
     helpEffort: "  /effort <级别> — 切换当前 provider 的思考程度",
     helpSectionConfig: "配置与帮助",
@@ -123,6 +121,8 @@ const STRINGS = {
     configShowHeader: "当前配置：",
     configUnsupported: (key: string, valid: string) =>
       `不支持的配置项: ${key}\n可设置的配置项: ${valid}`,
+    configKeyRefused: (key: string) =>
+      `🔒 出于安全加固，${key} 不允许在运行时修改，请直接编辑 config.toml 并重启。`,
     configInvalidValue: (rawValue: string, key: string, reason: string) =>
       `无效的值: ${rawValue}，${key} 需要 ${reason}`,
     configPersistSkipped: "（持久化跳过：configPath 未配置）",
@@ -157,6 +157,8 @@ const STRINGS = {
       `${provider} 不支持思考程度 ${effort}，可用值: ${values}`,
     cdNotDir: (path: string) => `路径不是目录: ${path}`,
     cdNotFound: (path: string) => `路径不存在: ${path}`,
+    cdLocked: (path: string, root: string) =>
+      `🔒 工作目录已锁定：${path} 不在 ${root} 之内。如需放开请在 config.toml 设置 agent.locked_cwd = false。`,
     cdSendFailed: "发送确认卡片失败",
     projectUnknown: (alias: string, list: string) =>
       `未知项目别名: ${alias}，可用别名: ${list}`,
@@ -219,12 +221,10 @@ const STRINGS = {
     permBtnAllow: "✅ Allow",
     permBtnDeny: "❌ Deny",
     permBtnAllowTurn: "✅ Accept (this turn)",
-    permBtnAllowSession: "✅ Accept (session)",
     permFooter: "Only the requester can click · auto-denied after 5 min",
     permResolvedAllow: "Allowed",
     permResolvedDeny: "Denied",
     permResolvedAllowTurn: "Accepted (turn)",
-    permResolvedAllowSession: "Accepted (session)",
     permCancelled: (tool: string, reason: string) =>
       `🛑 Cancelled \`${tool}\` (${reason})`,
     permTimedOut: (tool: string) => `⏰ Timed out · \`${tool}\``,
@@ -275,7 +275,7 @@ const STRINGS = {
     helpSectionMode: "Model & permissions",
     helpProvider: "  /provider <claude|codex> — Switch the current session provider",
     helpMode:
-      "  /mode <mode>  — Set permission mode (default / acceptEdits / plan / bypassPermissions)",
+      "  /mode <mode>  — Set permission mode (default / acceptEdits / plan)",
     helpModel: "  /model <name> — Switch the current provider model",
     helpEffort: "  /effort <level> — Switch the current provider reasoning effort",
     helpSectionConfig: "Config & help",
@@ -299,6 +299,8 @@ const STRINGS = {
     configShowHeader: "Current config:",
     configUnsupported: (key: string, valid: string) =>
       `Unknown config key: ${key}\nSettable keys: ${valid}`,
+    configKeyRefused: (key: string) =>
+      `🔒 Hardened build: ${key} cannot be changed at runtime. Edit config.toml and restart.`,
     configInvalidValue: (rawValue: string, key: string, reason: string) =>
       `Invalid value: ${rawValue} — ${key} expects ${reason}`,
     configPersistSkipped: "(persist skipped: configPath not set)",
@@ -338,6 +340,8 @@ const STRINGS = {
       `${provider} does not support reasoning effort ${effort}. Valid values: ${values}`,
     cdNotDir: (path: string) => `Not a directory: ${path}`,
     cdNotFound: (path: string) => `Path not found: ${path}`,
+    cdLocked: (path: string, root: string) =>
+      `🔒 Working directory is locked: ${path} is outside ${root}. Set agent.locked_cwd = false in config.toml to allow it.`,
     cdSendFailed: "Failed to send confirmation card",
     projectUnknown: (alias: string, list: string) =>
       `Unknown project alias: ${alias} — available: ${list}`,

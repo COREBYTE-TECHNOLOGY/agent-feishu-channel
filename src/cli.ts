@@ -4,6 +4,7 @@ import { parseArgs } from "node:util";
 import {
   readFileSync,
   copyFileSync,
+  chmodSync,
   mkdirSync,
   existsSync,
   renameSync,
@@ -33,7 +34,8 @@ Environment variables:
   AGENT_FEISHU_CONFIG      Override the default config file path
   CLAUDE_FEISHU_CONFIG     Legacy alias for AGENT_FEISHU_CONFIG (still honored)
 
-Documentation: https://github.com/Blackman99/agent-feishu-channel`;
+Documentation: https://github.com/COREBYTE-TECHNOLOGY/agent-feishu-channel (COREBYTE hardened fork)
+Upstream:      https://github.com/Blackman99/agent-feishu-channel`;
 }
 
 /**
@@ -69,8 +71,10 @@ export function runInit(
     return { created: false, targetFile };
   }
 
-  mkdirSync(targetDir, { recursive: true });
+  mkdirSync(targetDir, { recursive: true, mode: 0o700 });
   copyFileSync(templatePath, targetFile);
+  // COREBYTE hardening: the file will hold app_secret — owner read/write only.
+  chmodSync(targetFile, 0o600);
   return { created: true, targetFile };
 }
 

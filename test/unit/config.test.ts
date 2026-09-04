@@ -2,7 +2,13 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
-import { loadConfig, ConfigError, writeConfigKey } from "../../src/config.js";
+import {
+  loadConfig,
+  ConfigError,
+  isWithinDirectory,
+  writeConfigKey,
+} from "../../src/config.js";
+import { statSync } from "node:fs";
 
 let tmpDir: string;
 
@@ -27,6 +33,7 @@ app_secret = "secret"
 
 [access]
 allowed_open_ids = ["ou_test"]
+allowed_chat_ids = ["oc_test"]
 `;
 
 describe("loadConfig", () => {
@@ -205,7 +212,7 @@ default_provider = "codex"
 
 [claude]
 default_cwd = "/tmp/legacy"
-default_permission_mode = "bypassPermissions"
+default_permission_mode = "plan"
 permission_timeout_seconds = 180
 permission_warn_before_seconds = 45
 default_model = "claude-opus-4-7"
@@ -214,13 +221,13 @@ cli_path = "claude"
     const cfg = await loadConfig(path);
     expect(cfg.agent.defaultProvider).toBe("codex");
     expect(cfg.agent.defaultCwd).toBe("/tmp/legacy");
-    expect(cfg.agent.defaultPermissionMode).toBe("bypassPermissions");
+    expect(cfg.agent.defaultPermissionMode).toBe("plan");
     expect(cfg.agent.permissionTimeoutMs).toBe(180_000);
     expect(cfg.agent.permissionWarnBeforeMs).toBe(45_000);
     expect(cfg.claude.defaultCwd).toBe("/tmp/legacy");
-    expect(cfg.claude.defaultPermissionMode).toBe("bypassPermissions");
+    expect(cfg.claude.defaultPermissionMode).toBe("plan");
     expect(cfg.codex.defaultModel).toBe("gpt-5.5");
-    expect(cfg.codex.defaultPermissionMode).toBe("bypassPermissions");
+    expect(cfg.codex.defaultPermissionMode).toBe("plan");
   });
 
   it("lets provider-specific settings override partial shared fallbacks", async () => {
@@ -266,6 +273,7 @@ app_id = "cli_test"
 
 [access]
 allowed_open_ids = ["ou_test"]
+allowed_chat_ids = ["oc_test"]
 `);
     await expect(loadConfig(path)).rejects.toThrow(/feishu\.app_secret/);
   });
@@ -278,6 +286,7 @@ app_secret = "secret"
 
 [access]
 allowed_open_ids = []
+allowed_chat_ids = ["oc_test"]
 
 [claude]
 default_cwd = "/tmp/cfc-test"
@@ -294,6 +303,7 @@ app_secret = "secret"
 
 [access]
 allowed_open_ids = ["ou_test"]
+allowed_chat_ids = ["oc_test"]
 unauthorized_behavior = "reject"
 
 [claude]
@@ -311,6 +321,7 @@ app_secret = "secret"
 
 [access]
 allowed_open_ids = ["ou_test"]
+allowed_chat_ids = ["oc_test"]
 unauthorized_behavior = "bogus"
 
 [claude]
@@ -443,6 +454,10 @@ describe("projects table", () => {
   it("parses [projects] with tilde expansion", async () => {
     const path = writeConfig(`
 ${MINIMAL_CONFIG}
+
+[agent]
+# aliases below live outside default_cwd — only legal with the lock off
+locked_cwd = false
 
 [claude]
 default_cwd = "/tmp/cfc-test"
@@ -693,5 +708,226 @@ default_cwd = "/tmp/cfc-test"
   it("throws on nonexistent config file", async () => {
     const path = join(tmpDir, "nonexistent.toml");
     await expect(writeConfigKey(path, "logging.level", "debug")).rejects.toThrow();
+  });
+});
+
+describe("COREBYTE hardening — [feishu].domain", () => {
+  it("defaults to lark (international)", async () => {
+    const path = writeConfig(`
+${MINIMAL_CONFIG}
+[agent]
+default_cwd = "/tmp/cfc-test"
+[claude]
+`);
+    const cfg = await loadConfig(path);
+    expect(cfg.feishu.domain).toBe("lark");
+  });
+
+  it("accepts feishu explicitly", async () => {
+    const path = writeConfig(`
+[feishu]
+app_id = "cli_test"
+app_secret = "secret"
+domain = "feishu"
+
+[access]
+allowed_open_ids = ["ou_test"]
+allowed_chat_ids = ["oc_test"]
+
+[agent]
+default_cwd = "/tmp/cfc-test"
+[claude]
+`);
+    const cfg = await loadConfig(path);
+    expect(cfg.feishu.domain).toBe("feishu");
+  });
+
+  it("rejects unknown domain values", async () => {
+    const path = writeConfig(`
+[feishu]
+app_id = "cli_test"
+app_secret = "secret"
+domain = "dingtalk"
+
+[access]
+allowed_open_ids = ["ou_test"]
+allowed_chat_ids = ["oc_test"]
+
+[agent]
+default_cwd = "/tmp/cfc-test"
+[claude]
+`);
+    await expect(loadConfig(path)).rejects.toThrow(/feishu\.domain/);
+  });
+});
+
+describe("COREBYTE hardening — [access].allowed_chat_ids", () => {
+  it("is required", async () => {
+    const path = writeConfig(`
+[feishu]
+app_id = "cli_test"
+app_secret = "secret"
+
+[access]
+allowed_open_ids = ["ou_test"]
+
+[agent]
+default_cwd = "/tmp/cfc-test"
+[claude]
+`);
+    await expect(loadConfig(path)).rejects.toThrow(/access\.allowed_chat_ids/);
+  });
+
+  it("must be non-empty", async () => {
+    const path = writeConfig(`
+[feishu]
+app_id = "cli_test"
+app_secret = "secret"
+
+[access]
+allowed_open_ids = ["ou_test"]
+allowed_chat_ids = []
+
+[agent]
+default_cwd = "/tmp/cfc-test"
+[claude]
+`);
+    await expect(loadConfig(path)).rejects.toThrow(/access\.allowed_chat_ids/);
+  });
+
+  it("is exposed as access.allowedChatIds", async () => {
+    const path = writeConfig(`
+${MINIMAL_CONFIG}
+[agent]
+default_cwd = "/tmp/cfc-test"
+[claude]
+`);
+    const cfg = await loadConfig(path);
+    expect(cfg.access.allowedChatIds).toEqual(["oc_test"]);
+  });
+});
+
+describe("COREBYTE hardening — bypassPermissions removed", () => {
+  it.each(["agent", "claude", "codex"])(
+    "rejects default_permission_mode = bypassPermissions under [%s]",
+    async (section) => {
+      const path = writeConfig(`
+${MINIMAL_CONFIG}
+[agent]
+default_cwd = "/tmp/cfc-test"
+[claude]
+[codex]
+[${section}]
+default_permission_mode = "bypassPermissions"
+`);
+      await expect(loadConfig(path)).rejects.toThrow(ConfigError);
+      await expect(loadConfig(path)).rejects.toThrow(/default_permission_mode/);
+    },
+  );
+});
+
+describe("COREBYTE hardening — agent.locked_cwd", () => {
+  it("defaults to true", async () => {
+    const path = writeConfig(`
+${MINIMAL_CONFIG}
+[agent]
+default_cwd = "/tmp/cfc-test"
+[claude]
+`);
+    const cfg = await loadConfig(path);
+    expect(cfg.agent.lockedCwd).toBe(true);
+  });
+
+  it("defaults to true even when [agent] is omitted entirely", async () => {
+    const path = writeConfig(`
+${MINIMAL_CONFIG}
+[claude]
+default_cwd = "/tmp/cfc-test"
+`);
+    const cfg = await loadConfig(path);
+    expect(cfg.agent.lockedCwd).toBe(true);
+  });
+
+  it("rejects a [projects] alias outside default_cwd while locked", async () => {
+    const path = writeConfig(`
+${MINIMAL_CONFIG}
+[agent]
+default_cwd = "/tmp/cfc-test"
+[claude]
+[projects]
+ok = "/tmp/cfc-test/ok"
+evil = "/etc"
+sneaky = "/tmp/cfc-test/../../etc"
+`);
+    const err = await loadConfig(path).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(ConfigError);
+    const message = (err as Error).message;
+    expect(message).toMatch(/projects\.evil/);
+    expect(message).toMatch(/projects\.sneaky/);
+    expect(message).not.toMatch(/projects\.ok/);
+  });
+
+  it("accepts [projects] aliases inside default_cwd (incl. default_cwd itself and ~ expansion)", async () => {
+    const path = writeConfig(`
+${MINIMAL_CONFIG}
+[agent]
+default_cwd = "~/afc-root"
+[claude]
+[projects]
+root = "~/afc-root"
+svc = "~/afc-root/svc"
+`);
+    const cfg = await loadConfig(path);
+    expect(cfg.agent.lockedCwd).toBe(true);
+    expect(Object.keys(cfg.projects)).toEqual(["root", "svc"]);
+  });
+
+  it("allows outside aliases when locked_cwd = false", async () => {
+    const path = writeConfig(`
+${MINIMAL_CONFIG}
+[agent]
+default_cwd = "/tmp/cfc-test"
+locked_cwd = false
+[claude]
+[projects]
+evil = "/etc"
+`);
+    const cfg = await loadConfig(path);
+    expect(cfg.agent.lockedCwd).toBe(false);
+    expect(cfg.projects.evil).toBe("/etc");
+  });
+});
+
+describe("isWithinDirectory", () => {
+  it("accepts the base itself and nested paths", () => {
+    expect(isWithinDirectory("/srv/work", "/srv/work")).toBe(true);
+    expect(isWithinDirectory("/srv/work/", "/srv/work")).toBe(true);
+    expect(isWithinDirectory("/srv/work", "/srv/work/")).toBe(true);
+    expect(isWithinDirectory("/srv/work", "/srv/work/a/b")).toBe(true);
+    expect(isWithinDirectory("/srv/work", "/srv/work/a/../b")).toBe(true);
+  });
+
+  it("rejects parents, siblings and prefix look-alikes", () => {
+    expect(isWithinDirectory("/srv/work", "/srv")).toBe(false);
+    expect(isWithinDirectory("/srv/work", "/srv/work/..")).toBe(false);
+    expect(isWithinDirectory("/srv/work", "/srv/work-evil")).toBe(false);
+    expect(isWithinDirectory("/srv/work", "/srv/workspace")).toBe(false);
+    expect(isWithinDirectory("/srv/work", "/etc")).toBe(false);
+    expect(isWithinDirectory("/srv/work", "/srv/work/../other")).toBe(false);
+  });
+});
+
+describe("COREBYTE hardening — writeConfigKey file mode", () => {
+  it("leaves the rewritten config owner-only (0600)", async () => {
+    const path = writeConfig(`
+${MINIMAL_CONFIG}
+[render]
+hide_thinking = false
+`);
+    await writeConfigKey(path, "render.hide_thinking", true);
+    expect(statSync(path).mode & 0o777).toBe(0o600);
   });
 });

@@ -17,7 +17,8 @@ interface BuildPendingArgs {
 }
 
 /**
- * Build the pending-state permission card with 4 buttons. The
+ * Build the pending-state permission card with 3 buttons (COREBYTE
+ * hardening removed the sticky `allow_session` button). The
  * buttons' `value` field carries `{kind: "permission", request_id,
  * choice}` so the gateway's `card.action.trigger` handler can route
  * clicks back to `broker.resolveByCard(requestId, choice)`.
@@ -45,7 +46,6 @@ export function buildPermissionCard(args: BuildPendingArgs): FeishuCardV2 {
     ]),
     buttonRow([
       makeButton(s.permBtnAllowTurn, "allow_turn", args.requestId, "default"),
-      makeButton(s.permBtnAllowSession, "allow_session", args.requestId, "default"),
     ]),
     {
       tag: "markdown",
@@ -69,7 +69,7 @@ export function buildPermissionCard(args: BuildPendingArgs): FeishuCardV2 {
 
 interface BuildResolvedArgs {
   toolName: string;
-  choice: "allow" | "deny" | "allow_turn" | "allow_session";
+  choice: "allow" | "deny" | "allow_turn";
   locale: Locale;
 }
 
@@ -86,7 +86,6 @@ export function buildPermissionCardResolved(
     allow: s.permResolvedAllow,
     deny: s.permResolvedDeny,
     allow_turn: s.permResolvedAllowTurn,
-    allow_session: s.permResolvedAllowSession,
   }[args.choice];
   const icon = args.choice === "deny" ? "❌" : "✅";
   return {
@@ -160,7 +159,7 @@ function buttonRow(buttons: FeishuElement[]): FeishuElement {
 
 function makeButton(
   label: string,
-  choice: "allow" | "deny" | "allow_turn" | "allow_session",
+  choice: "allow" | "deny" | "allow_turn",
   requestId: string,
   type: "primary" | "danger" | "default",
 ): FeishuElement {

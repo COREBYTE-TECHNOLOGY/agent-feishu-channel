@@ -166,10 +166,10 @@ describe("parseInput — Phase 6 commands", () => {
     });
   });
 
-  it("/mode bypassPermissions → command mode", () => {
+  it("/mode bypassPermissions → unknown_command (removed in COREBYTE fork)", () => {
     expect(parseInput("/mode bypassPermissions")).toEqual({
-      kind: "command",
-      cmd: { name: "mode", mode: "bypassPermissions" },
+      kind: "unknown_command",
+      raw: "/mode bypassPermissions",
     });
   });
 

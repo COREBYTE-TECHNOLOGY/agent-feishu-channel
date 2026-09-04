@@ -6,7 +6,7 @@ import { createLogger } from "./util/logger.js";
 import { StateStore, type State } from "./persistence/state-store.js";
 import { AccessControl } from "./access.js";
 import { FeishuClient } from "./feishu/client.js";
-import { FeishuGateway } from "./feishu/gateway.js";
+import { FeishuGateway, toLarkDomain } from "./feishu/gateway.js";
 import { checkClaudeCli } from "./claude/preflight.js";
 import { createSdkQueryFn } from "./claude/sdk-query.js";
 import { ClaudeSessionManager } from "./claude/session-manager.js";
@@ -122,12 +122,14 @@ export async function main(configPathOverride?: string): Promise<void> {
 
   const access = new AccessControl({
     allowedOpenIds: config.access.allowedOpenIds,
+    allowedChatIds: config.access.allowedChatIds,
     unauthorizedBehavior: config.access.unauthorizedBehavior,
   });
 
   const lark = new LarkClient({
     appId: config.feishu.appId,
     appSecret: config.feishu.appSecret,
+    domain: toLarkDomain(config.feishu.domain),
   });
   const feishuClient = new FeishuClient(lark);
 
@@ -853,11 +855,12 @@ export async function main(configPathOverride?: string): Promise<void> {
         logger.warn({ value }, "Permission card action missing request_id");
         return;
       }
+      // COREBYTE hardening: `allow_session` is no longer a valid choice —
+      // clicks carrying it (from stale cards) are rejected here.
       if (
         choice !== "allow" &&
         choice !== "deny" &&
-        choice !== "allow_turn" &&
-        choice !== "allow_session"
+        choice !== "allow_turn"
       ) {
         logger.warn({ value }, "Permission card action has invalid choice");
         return;
@@ -975,6 +978,7 @@ export async function main(configPathOverride?: string): Promise<void> {
   const gateway = new FeishuGateway({
     appId: config.feishu.appId,
     appSecret: config.feishu.appSecret,
+    domain: config.feishu.domain,
     logger,
     lark,
     feishuClient,
@@ -1027,6 +1031,9 @@ export async function main(configPathOverride?: string): Promise<void> {
   logger.info(
     {
       allowed_count: config.access.allowedOpenIds.length,
+      allowed_chat_count: config.access.allowedChatIds.length,
+      lark_domain: config.feishu.domain,
+      locked_cwd: config.agent.lockedCwd,
       unauthorized_behavior: config.access.unauthorizedBehavior,
       cli_path: config.claude.cliPath,
       default_cwd: config.claude.defaultCwd,
@@ -1039,11 +1046,4 @@ export async function main(configPathOverride?: string): Promise<void> {
     },
     "agent-feishu-channel ready",
   );
-
-  if (config.claude.defaultPermissionMode === "bypassPermissions") {
-    logger.warn(
-      { permission_mode: "bypassPermissions" },
-      "Phase 5 shipped — permission brokering is ACTIVE only when default_permission_mode != 'bypassPermissions'. Your current config bypasses the broker; tool calls will not prompt for approval.",
-    );
-  }
 }

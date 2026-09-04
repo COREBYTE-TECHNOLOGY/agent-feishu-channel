@@ -30,9 +30,9 @@ export interface ClaudeQueryOptions extends ProviderRunOptions {
  *
  * Return type is intentionally narrower than the broker's internal
  * `PermissionResponse`: the SDK only understands `allow` / `deny`, so
- * the session's closure translates broker-level `allow_turn` /
- * `allow_session` responses into `{allow}` plus side effects
- * (`handle.setPermissionMode` and/or sticky flag) before returning.
+ * the session's closure translates the broker-level `allow_turn`
+ * response into `{allow}` plus a turn-scoped `handle.setPermissionMode`
+ * before returning.
  */
 export type CanUseToolFn = (
   toolName: string,

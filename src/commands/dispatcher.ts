@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { access, appendFile, readFile, stat } from "node:fs/promises";
+import { resolve as resolvePath } from "node:path";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Logger } from "pino";
@@ -25,7 +26,7 @@ import {
   buildCdConfirmTimedOut,
 } from "../feishu/cards/cd-confirm-card.js";
 import { buildProjectsCard, buildSessionsCard } from "../feishu/cards.js";
-import { writeConfigKey } from "../config.js";
+import { isWithinDirectory, writeConfigKey } from "../config.js";
 import { t, type Locale } from "../util/i18n.js";
 
 type KeyType = "boolean" | "number" | "fraction" | "string" | "enum";
@@ -40,12 +41,12 @@ const MODEL_CONTEXT_WINDOWS: Array<[prefix: string, tokens: number]> = [
   ["claude-haiku-4", 200_000],
 ];
 
-const PERMISSION_MODE_VALUES = [
-  "default",
-  "acceptEdits",
-  "plan",
-  "bypassPermissions",
-] as const;
+// COREBYTE hardening: permission-mode keys are intentionally absent from
+// SETTABLE_KEYS — `/config set` must never be able to change them. `/mode`
+// (session-scoped, non-persisted) is the only runtime switch, and it only
+// accepts default / acceptEdits / plan.
+const PERMISSION_MODE_KEY_SUFFIX = "_permission_mode";
+const CWD_KEY_SUFFIX = "default_cwd";
 const CLAUDE_EFFORT_VALUES = [
   "low",
   "medium",
@@ -111,15 +112,6 @@ const SETTABLE_KEYS: Record<string, SettableKeyDef> = {
     paths: [["agent", "defaultCwd"], ["claude", "defaultCwd"]],
     type: "string",
   },
-  "agent.default_permission_mode": {
-    paths: [
-      ["agent", "defaultPermissionMode"],
-      ["claude", "defaultPermissionMode"],
-      ["codex", "defaultPermissionMode"],
-    ],
-    type: "enum",
-    values: PERMISSION_MODE_VALUES,
-  },
   "agent.permission_timeout_seconds": {
     paths: [["agent", "permissionTimeoutMs"], ["claude", "permissionTimeoutMs"]],
     type: "number",
@@ -140,11 +132,6 @@ const SETTABLE_KEYS: Record<string, SettableKeyDef> = {
     paths: [["claude", "defaultCwd"], ["agent", "defaultCwd"]],
     type: "string",
   },
-  "claude.default_permission_mode": {
-    path: ["claude", "defaultPermissionMode"],
-    type: "enum",
-    values: PERMISSION_MODE_VALUES,
-  },
   "claude.permission_timeout_seconds": {
     path: ["claude", "permissionTimeoutMs"],
     type: "number",
@@ -160,11 +147,6 @@ const SETTABLE_KEYS: Record<string, SettableKeyDef> = {
     path: ["codex", "defaultEffort"],
     type: "enum",
     values: CODEX_EFFORT_VALUES,
-  },
-  "codex.default_permission_mode": {
-    path: ["codex", "defaultPermissionMode"],
-    type: "enum",
-    values: PERMISSION_MODE_VALUES,
   },
 };
 
@@ -440,6 +422,7 @@ export class CommandDispatcher {
       s.configShowHeader,
       "",
       "[feishu]",
+      `  domain: ${cfg.feishu.domain}`,
       `  appId: ${cfg.feishu.appId}`,
       `  appSecret: ***`,
       `  encryptKey: ***`,
@@ -447,11 +430,13 @@ export class CommandDispatcher {
       "",
       "[access]",
       `  allowedOpenIds: ${cfg.access.allowedOpenIds.join(", ") || "(none)"}`,
+      `  allowedChatIds: ${cfg.access.allowedChatIds.join(", ") || "(none)"}`,
       `  unauthorizedBehavior: ${cfg.access.unauthorizedBehavior}`,
       "",
       "[agent]",
       `  defaultProvider: ${cfg.agent.defaultProvider}`,
       `  defaultCwd: ${cfg.agent.defaultCwd}`,
+      `  lockedCwd: ${cfg.agent.lockedCwd}`,
       `  defaultPermissionMode: ${cfg.agent.defaultPermissionMode}`,
       `  permissionTimeoutMs: ${cfg.agent.permissionTimeoutMs}`,
       `  permissionWarnBeforeMs: ${cfg.agent.permissionWarnBeforeMs}`,
@@ -504,6 +489,23 @@ export class CommandDispatcher {
     persist: boolean,
     ctx: CommandContext,
   ): Promise<void> {
+    // COREBYTE hardening: refuse permission-mode keys outright (they are not
+    // in SETTABLE_KEYS either, but say so explicitly), and refuse moving the
+    // cwd boundary while the working directory is locked.
+    if (key.endsWith(PERMISSION_MODE_KEY_SUFFIX)) {
+      await this.feishu.replyText(
+        ctx.parentMessageId,
+        t(ctx.locale).configKeyRefused(key),
+      );
+      return;
+    }
+    if (this.config.agent.lockedCwd && key.endsWith(CWD_KEY_SUFFIX)) {
+      await this.feishu.replyText(
+        ctx.parentMessageId,
+        t(ctx.locale).configKeyRefused(key),
+      );
+      return;
+    }
     const def = SETTABLE_KEYS[key];
     if (!def) {
       const validKeys = Object.keys(SETTABLE_KEYS).join(", ");
@@ -625,7 +627,7 @@ export class CommandDispatcher {
       await this.feishu.replyText(ctx.parentMessageId, t(ctx.locale).sessionBusy);
       return;
     }
-    session.setPermissionModeOverride(mode as "default" | "acceptEdits" | "plan" | "bypassPermissions");
+    session.setPermissionModeOverride(mode as PermissionMode);
     this.sessionManager.persistNow();
     await this.feishu.replyText(ctx.parentMessageId, t(ctx.locale).modeSwitched(mode));
   }
@@ -689,6 +691,22 @@ export class CommandDispatcher {
   }
 
   private async handleCd(path: string, ctx: CommandContext): Promise<void> {
+    // COREBYTE hardening: with agent.locked_cwd the target must be
+    // agent.default_cwd itself or a directory inside it. Checked before any
+    // filesystem access so the reply leaks nothing about paths outside.
+    const root = this.config.agent.defaultCwd;
+    if (this.config.agent.lockedCwd && !isWithinDirectory(root, path)) {
+      this.logger.warn(
+        { chat_id: ctx.chatId, open_id: ctx.senderOpenId, path },
+        "/cd refused: target outside locked default_cwd",
+      );
+      await this.feishu.replyText(
+        ctx.parentMessageId,
+        t(ctx.locale).cdLocked(path, root),
+      );
+      return;
+    }
+    path = resolvePath(path);
     const session = this.sessionManager.getOrCreate(ctx.chatId);
     if (session.getState() !== "idle") {
       await this.feishu.replyText(ctx.parentMessageId, t(ctx.locale).sessionBusy);

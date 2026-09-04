@@ -83,7 +83,7 @@ export function createSdkQueryFn(opts: SdkQueryFnOptions): QueryFn {
     };
 
     const setPermissionMode = (
-      mode: "default" | "acceptEdits" | "plan" | "bypassPermissions",
+      mode: "default" | "acceptEdits" | "plan",
     ): void => {
       try {
         void (q as { setPermissionMode?: (m: string) => Promise<void> }).setPermissionMode?.(

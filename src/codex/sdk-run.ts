@@ -129,17 +129,15 @@ function deltaText(
   return next;
 }
 
+// COREBYTE hardening: there is deliberately no mapping to
+// `approvalPolicy: "never"` / `sandboxMode: "danger-full-access"`. Codex
+// can never be started unsandboxed from the bot.
 function mapPermissionMode(mode: PermissionMode): Pick<ThreadOptions, "approvalPolicy" | "sandboxMode"> {
   switch (mode) {
     case "plan":
       return {
         approvalPolicy: "on-request",
         sandboxMode: "read-only",
-      };
-    case "bypassPermissions":
-      return {
-        approvalPolicy: "never",
-        sandboxMode: "danger-full-access",
       };
     case "acceptEdits":
       return {

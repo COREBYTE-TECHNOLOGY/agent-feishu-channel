@@ -53,7 +53,7 @@ The bot has full shell and file access to your machine. Always configure `allowe
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `default_permission_mode` | `"default"` | Claude permission mode: `default`, `acceptEdits`, `plan`, `bypassPermissions` |
+| `default_permission_mode` | `"default"` | Claude permission mode: `default`, `acceptEdits`, `plan` (`bypassPermissions` removed in the COREBYTE fork) |
 | `default_model` | `"claude-opus-4-6"` | Model ID passed to the CLI's `--model` flag |
 | `default_effort` | `"high"` | Claude SDK effort: `low`, `medium`, `high`, `xhigh`, `max` |
 | `permission_timeout_seconds` | `300` | Seconds before a Claude permission card auto-denies |
@@ -64,7 +64,7 @@ The bot has full shell and file access to your machine. Always configure `allowe
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `default_permission_mode` | `"default"` | Codex permission mode: `default`, `acceptEdits`, `plan`, `bypassPermissions` |
+| `default_permission_mode` | `"default"` | Codex permission mode: `default`, `acceptEdits`, `plan` (`bypassPermissions` removed in the COREBYTE fork) |
 | `default_model` | `"gpt-5.5"` | Model ID passed to the Codex SDK |
 | `default_effort` | `"high"` | Codex reasoning effort: `minimal`, `low`, `medium`, `high`, `xhigh` |
 | `cli_path` | `"codex"` | Path to the `codex` binary; resolves via `$PATH` by default |

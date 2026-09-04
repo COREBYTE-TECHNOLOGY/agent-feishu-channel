@@ -175,28 +175,6 @@ describe("FeishuPermissionBroker.resolveByCard", () => {
     expect(await p).toEqual({ behavior: "allow_turn" });
   });
 
-  it("owner click with choice=allow_session resolves with {allow_session}", async () => {
-    const f = makeFakeFeishu();
-    const broker = makeBroker(f.client, new FakeClock());
-    const p = broker.request({
-      toolName: "Edit",
-      input: {},
-      chatId: "oc_1",
-      ownerOpenId: "ou_owner",
-      parentMessageId: "om_p",
-      locale: "zh",
-    });
-    await Promise.resolve();
-    await Promise.resolve();
-    const requestId = findRequestIdInCard(f.replyCard.mock.calls[0]![1]);
-    await broker.resolveByCard({
-      requestId,
-      senderOpenId: "ou_owner",
-      choice: "allow_session",
-    });
-    expect(await p).toEqual({ behavior: "allow_session" });
-  });
-
   it("non-owner click returns forbidden and leaves the request pending", async () => {
     const f = makeFakeFeishu();
     const broker = makeBroker(f.client, new FakeClock());

@@ -505,7 +505,7 @@ describe("ClaudeSessionManager — Persistence startup", () => {
       cwd: "/tmp/cfc-test",
       createdAt: new Date().toISOString(),
       lastActiveAt: new Date().toISOString(),
-      permissionMode: "bypassPermissions",
+      permissionMode: "plan",
       model: "gpt-5.5",
     };
 

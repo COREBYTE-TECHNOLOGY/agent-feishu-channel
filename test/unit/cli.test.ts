@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { existsSync, mkdirSync, copyFileSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, copyFileSync, readFileSync, statSync } from "node:fs";
 import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -113,6 +113,8 @@ describe("runInit", () => {
     const copied = readFileSync(join(targetDir, "config.toml"), "utf-8");
     const original = readFileSync(templatePath, "utf-8");
     expect(copied).toBe(original);
+    // COREBYTE hardening: config.toml holds app_secret — must be 0600.
+    expect(statSync(join(targetDir, "config.toml")).mode & 0o777).toBe(0o600);
   });
 
   it("skips when config.toml already exists", async () => {

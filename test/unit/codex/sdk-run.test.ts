@@ -237,7 +237,7 @@ describe("createCodexQueryFn", () => {
         cwd: "/tmp/project",
         model: "gpt-5.5",
         effort: "high",
-        permissionMode: "bypassPermissions",
+        permissionMode: "acceptEdits",
         settingSources: ["project"],
       },
       canUseTool: noopCanUseTool,
@@ -257,12 +257,49 @@ describe("createCodexQueryFn", () => {
       expect.objectContaining({
         model: "gpt-5.5",
         workingDirectory: "/tmp/project",
-        approvalPolicy: "never",
-        sandboxMode: "danger-full-access",
+        approvalPolicy: "on-failure",
+        sandboxMode: "workspace-write",
       }),
     );
     expect(seenSignal?.aborted).toBe(true);
   });
+
+  it.each(["default", "acceptEdits", "plan", "bypassPermissions"])(
+    "COREBYTE hardening: permissionMode=%s never yields approvalPolicy=never / danger-full-access",
+    async (mode) => {
+      const sdk = makeSdk([], { threadId: "thread_hardened" });
+      const fn = createCodexQueryFn({
+        cliPath: "codex",
+        logger: SILENT,
+        loadSdk: async () => sdk as unknown as typeof import("@openai/codex-sdk"),
+      });
+
+      const handle = fn({
+        prompt: "hello",
+        options: {
+          cwd: "/tmp/project",
+          model: "gpt-5.5",
+          effort: "high",
+          // Cast: "bypassPermissions" is no longer in the type; a stale
+          // persisted value must still fall through to a sandboxed mapping.
+          permissionMode: mode as "default",
+          settingSources: ["project"],
+        },
+        canUseTool: noopCanUseTool,
+      });
+      for await (const _ of handle.messages) {
+        void _;
+      }
+
+      expect(sdk.startThread).toHaveBeenCalledTimes(1);
+      const opts = sdk.startThread.mock.calls[0]![0] as {
+        approvalPolicy?: string;
+        sandboxMode?: string;
+      };
+      expect(opts.approvalPolicy).not.toBe("never");
+      expect(opts.sandboxMode).not.toBe("danger-full-access");
+    },
+  );
 
   it("checks Codex SDK availability through the shared loader helper", async () => {
     const sdk = makeSdk([]);

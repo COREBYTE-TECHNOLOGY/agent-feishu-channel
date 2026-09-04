@@ -934,33 +934,8 @@ describe("ClaudeSession — canUseTool bridging via PermissionBroker", () => {
     h.broker.fakeResolve({ behavior: "allow_turn" });
     expect(await p).toEqual({ behavior: "allow" });
     expect(fake.permissionModeChanges).toEqual(["acceptEdits"]);
+    // COREBYTE hardening: no card click may ever make acceptEdits sticky.
     expect(h.session._testGetSessionAcceptEditsSticky()).toBe(false);
-    fake.finishWithSuccess({ durationMs: 1, inputTokens: 1, outputTokens: 1 });
-    await outcome.done;
-  });
-
-  it("broker allow_session flips sticky and calls setPermissionMode", async () => {
-    const h = makeBrokerHarness();
-    const spy = new SpyRenderer();
-    const outcome = await h.session.submit(
-      {
-        kind: "run",
-        text: "hi",
-        senderOpenId: "ou_alice",
-        parentMessageId: "om_root_1",
-        locale: "zh",
-      },
-      spy.emit,
-    );
-    if (outcome.kind !== "started") throw new Error("unreachable");
-    await flushMicrotasks();
-    const fake = h.fakes[0]!;
-    const p = fake.invokeCanUseTool("Edit", {});
-    await flushMicrotasks();
-    h.broker.fakeResolve({ behavior: "allow_session" });
-    expect(await p).toEqual({ behavior: "allow" });
-    expect(fake.permissionModeChanges).toEqual(["acceptEdits"]);
-    expect(h.session._testGetSessionAcceptEditsSticky()).toBe(true);
     fake.finishWithSuccess({ durationMs: 1, inputTokens: 1, outputTokens: 1 });
     await outcome.done;
   });

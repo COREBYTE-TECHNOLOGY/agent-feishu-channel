@@ -167,9 +167,6 @@ export class FeishuPermissionBroker implements PermissionBroker {
       case "allow_turn":
         p.deferred.resolve({ behavior: "allow_turn" });
         break;
-      case "allow_session":
-        p.deferred.resolve({ behavior: "allow_session" });
-        break;
     }
     return { kind: "resolved", card: resolvedCard };
   }

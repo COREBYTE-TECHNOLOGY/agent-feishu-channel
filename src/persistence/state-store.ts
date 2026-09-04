@@ -181,7 +181,11 @@ export class StateStore {
   async save(state: State): Promise<void> {
     await mkdir(dirname(this.path), { recursive: true });
     const tmp = `${this.path}.tmp`;
-    await writeFile(tmp, JSON.stringify(state, null, 2), "utf8");
+    // COREBYTE hardening: state.json carries chat/session ids — owner-only.
+    await writeFile(tmp, JSON.stringify(state, null, 2), {
+      encoding: "utf8",
+      mode: 0o600,
+    });
     await rename(tmp, this.path);
   }
 

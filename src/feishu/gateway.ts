@@ -1,10 +1,11 @@
 import {
   Client as LarkClient,
+  Domain,
   WSClient,
   EventDispatcher,
 } from "@larksuiteoapi/node-sdk";
 import type { Logger } from "pino";
-import type { IncomingMessage } from "../types.js";
+import type { FeishuDomain, IncomingMessage } from "../types.js";
 import type { AccessControl } from "../access.js";
 import type { FeishuCardV2 } from "./card-types.js";
 import { LruDedup } from "../util/dedup.js";
@@ -21,8 +22,18 @@ export interface CardActionEvent {
   action: {
     value: Record<string, unknown>;
   };
+  /**
+   * Card callback context. `open_chat_id` is the chat the card lives in;
+   * the COREBYTE chat allowlist is enforced on it. Optional in the type
+   * because the SDK does not guarantee it — a missing chat id is treated
+   * as NOT allowed.
+   */
+  context?: {
+    open_chat_id?: string;
+    open_message_id?: string;
+  };
   // The event carries more fields (token, tenant_key, form_value...)
-  // but Phase 5 only reads operator.open_id + action.value.
+  // that we do not read.
 }
 
 /**
@@ -40,9 +51,16 @@ export type CardActionHandler = (action: {
   value: Record<string, unknown>;
 }) => Promise<CardActionResult>;
 
+/** Map our config value onto the Lark SDK's `Domain` enum. */
+export function toLarkDomain(domain: FeishuDomain): Domain {
+  return domain === "feishu" ? Domain.Feishu : Domain.Lark;
+}
+
 export interface FeishuGatewayOptions {
   appId: string;
   appSecret: string;
+  /** Lark international ("lark") or Feishu China ("feishu"). */
+  domain: FeishuDomain;
   logger: Logger;
   lark: LarkClient;
   feishuClient: FeishuClient;
@@ -72,6 +90,7 @@ export class FeishuGateway {
     this.wsClient = new WSClient({
       appId: opts.appId,
       appSecret: opts.appSecret,
+      domain: toLarkDomain(opts.domain),
       loggerLevel: 2, // lark sdk's "warn"
     });
   }
@@ -112,6 +131,13 @@ export class FeishuGateway {
       return;
     }
 
+    // COREBYTE hardening: chat allowlist runs BEFORE the open_id check so
+    // an allowed user cannot drive the bot from an unlisted chat either.
+    if (!this.access.isChatAllowed(event.message.chat_id)) {
+      log.debug("Message from non-allowlisted chat, dropping");
+      return;
+    }
+
     const decision = this.access.check(event.sender.sender_id.open_id);
     if (!decision.allowed) {
       const senderOpenId = event.sender.sender_id.open_id;
@@ -149,7 +175,17 @@ export class FeishuGateway {
   private async handleCardAction(
     event: CardActionEvent,
   ): Promise<CardActionResult> {
-    const log = this.logger.child({ open_id: event.operator.open_id });
+    const chatId = event.context?.open_chat_id;
+    const log = this.logger.child({
+      open_id: event.operator.open_id,
+      chat_id: chatId,
+    });
+    // COREBYTE hardening: drop card clicks from chats outside the allowlist
+    // (or with no chat context at all) before anything else.
+    if (!this.access.isChatAllowed(chatId)) {
+      log.debug("Card action from non-allowlisted chat, dropping");
+      return;
+    }
     log.info(
       { value: event.action.value },
       "card.action.trigger received",
