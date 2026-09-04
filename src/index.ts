@@ -36,13 +36,14 @@ import { formatToolParams } from "./feishu/tool-formatters.js";
 import { replyFinalAnswerWithFallback } from "./feishu/final-reply.js";
 import {
   formatResultTip,
-  formatErrorText,
   formatQueuedTip,
   formatInterruptDropAck,
   formatStopAck,
   formatContextWarning,
   formatContextReset,
 } from "./feishu/messages.js";
+import { formatTurnFailure } from "./agent/turn-failure.js";
+import { PersistentDedup } from "./util/dedup.js";
 import type { IncomingMessage } from "./types.js";
 import { detectLocale, t } from "./util/i18n.js";
 
@@ -789,6 +790,24 @@ export async function main(configPathOverride?: string): Promise<void> {
         },
         emit,
       );
+      // Convert the turn's outcome into a settled *value* BEFORE any
+      // further await. `outcome.done` can reject within microtasks of
+      // `submit()` returning — a provider CLI that is not logged in
+      // fails on the very first pull — whereas `sendStatusCard()` below
+      // is a real Lark round trip. Attaching the handler only after
+      // that await left the rejection unobserved for a full tick, so
+      // Node fired `unhandledRejection` and (before this fix) killed
+      // the process mid-message; launchd then restarted it, Lark
+      // redelivered the event, and the bridge crash-looped. Observing
+      // it here makes the ordering irrelevant.
+      const turnSettled =
+        outcome.kind === "started" || outcome.kind === "queued"
+          ? outcome.done.then(
+            () => null,
+            (err: unknown) => ({ err }),
+          )
+          : null;
+
       // Only the input that actually starts a turn on this message
       // gets a status card. Queued `run`s get the "📥 已加入队列" text
       // reply instead (emitted from inside `session.submit`), so a
@@ -799,40 +818,40 @@ export async function main(configPathOverride?: string): Promise<void> {
       // `interrupt_and_run` always comes back as `started`, so the
       // two started-paths collapse into one.
       if (outcome.kind === "started") {
-        // Fire the status card in the background so it races with
-        // `session.submit`'s processLoop kickoff — the CLI spawn +
-        // first stream-json line is orders of magnitude slower than a
-        // card send, so the card lands first in practice. Awaiting
-        // here would serialize us against a single card round-trip
-        // before any events can flow.
         await sendStatusCard();
       }
-      if (outcome.kind === "started" || outcome.kind === "queued") {
-        try {
-          await outcome.done;
-        } catch (err) {
-          if (err instanceof InterruptedError) {
+
+      if (turnSettled !== null) {
+        const failure = await turnSettled;
+        if (failure !== null) {
+          if (failure.err instanceof InterruptedError) {
             // The session already emitted the appropriate
             // "interrupted" notice on the same emit channel — just
             // log and swallow so the outer catch doesn't surface a
             // generic error reply.
             logger.info(
-              { chat_id: msg.chatId, reason: err.reason },
+              { chat_id: msg.chatId, reason: failure.err.reason },
               "turn interrupted by user",
             );
             return;
           }
-          throw err;
+          throw failure.err;
         }
       }
       // kind === "rejected" (stop synthesized via submit) → nothing to do.
     } catch (err) {
+      // A failed turn is reported, never fatal: log it, tell the human
+      // in the chat they were waiting in, and leave the session (and the
+      // process) alive and ready for the next message.
       logger.error({ err, chat_id: msg.chatId }, "Claude turn failed");
-      const errorText = err instanceof Error ? err.message : String(err);
       try {
         await feishuClient.replyText(
           msg.messageId,
-          formatErrorText(errorText, locale),
+          formatTurnFailure({
+            err,
+            provider: session.getStatus().provider,
+            locale,
+          }),
         );
       } catch (sendErr) {
         logger.error({ err: sendErr }, "Failed to deliver error reply");
@@ -975,6 +994,19 @@ export async function main(configPathOverride?: string): Promise<void> {
     logger.warn({ value }, "Card action with unknown kind, ignoring");
   };
 
+  // Loop-prevention dedup: survives the restart that a crash (or a
+  // manual launchctl kickstart) causes, so a redelivered `message_id`
+  // is not reprocessed. See PersistentDedup for why this is explicitly
+  // not exactly-once.
+  const messageDedup = new PersistentDedup({
+    initial: stateStore.loadedSeenMessages(),
+    persist: (entries) => {
+      void stateStore.saveSeenMessages(entries).catch((err: unknown) => {
+        logger.warn({ err }, "Failed to persist message dedup ring");
+      });
+    },
+  });
+
   const gateway = new FeishuGateway({
     appId: config.feishu.appId,
     appSecret: config.feishu.appSecret,
@@ -986,6 +1018,7 @@ export async function main(configPathOverride?: string): Promise<void> {
     requireMention: config.access.requireMention,
     onMessage,
     onCardAction,
+    dedup: messageDedup,
   });
 
   await sessionManager.startupLoad();
@@ -1018,9 +1051,29 @@ export async function main(configPathOverride?: string): Promise<void> {
   // Fatal-error handlers intentionally do not call markCleanShutdown — after an
   // uncaught error the process state is unknown, so recording "clean" would be
   // misleading.
+
+  // An unhandled rejection is logged loudly but does NOT exit.
+  //
+  // A chat bridge has to outlive a single bad turn. Exiting here made
+  // things strictly worse in production: the process died mid-message,
+  // launchd (KeepAlive=true) restarted it, Lark redelivered the same
+  // event, it failed the same way, and the bridge crash-looped — three
+  // restarts in ~21 seconds — while the human in the chat saw nothing at
+  // all. Every path that can actually fail a turn now reports into the
+  // chat itself, so anything still reaching this handler is a leaked
+  // promise we want to fix from the log, not a reason to drop every
+  // in-flight conversation on the floor.
+  //
+  // `uncaughtException` below still exits, and that asymmetry is
+  // deliberate: a synchronous throw unwound an arbitrary stack and may
+  // have left module state half-mutated, so there is no safe way to
+  // reason about what survived. A rejected promise, by contrast, is a
+  // contained, already-unwound failure.
   process.on("unhandledRejection", (reason) => {
-    logger.fatal({ reason }, "Unhandled promise rejection");
-    process.exit(1);
+    logger.fatal(
+      { err: reason instanceof Error ? reason : undefined, reason },
+      "Unhandled promise rejection (kept running)",
+    );
   });
   process.on("uncaughtException", (err) => {
     logger.fatal({ err }, "Uncaught exception");

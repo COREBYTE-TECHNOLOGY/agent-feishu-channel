@@ -332,6 +332,22 @@ export class ClaudeSession {
       locale: input.locale,
     };
 
+    // Mark `done` as observed the instant it exists.
+    //
+    // The promise is handed back to the caller inside SubmitOutcome, but
+    // the caller is not guaranteed to attach its rejection handler in the
+    // same tick — `src/index.ts` awaits a Feishu status-card round trip
+    // first. A turn that fails immediately (the provider CLI is not
+    // logged in, so the SDK throws on the very first pull) therefore
+    // rejected a promise nobody was watching yet: Node fired
+    // `unhandledRejection`, the process exited, launchd restarted it,
+    // Lark redelivered the message, and the whole thing looped.
+    //
+    // An inert catch here settles that race permanently — the rejection
+    // is always "handled" — while the real consumer still observes it
+    // when it eventually awaits `outcome.done`.
+    void entry.done.promise.catch(() => {});
+
     if (input.kind === "interrupt_and_run") {
       return await this.submitInterruptAndRun(entry);
     }

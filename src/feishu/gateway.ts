@@ -8,7 +8,7 @@ import type { Logger } from "pino";
 import type { FeishuDomain, IncomingMessage } from "../types.js";
 import type { AccessControl } from "../access.js";
 import type { FeishuCardV2 } from "./card-types.js";
-import { LruDedup } from "../util/dedup.js";
+import { LruDedup, type DedupChecker } from "../util/dedup.js";
 import { FeishuClient, type BotIdentity } from "./client.js";
 import type { ReceiveV1Event } from "./types.js";
 import { translateReceiveEvent } from "./message-translator.js";
@@ -81,12 +81,19 @@ export interface FeishuGatewayOptions {
    * the network.
    */
   resolveBotIdentity?: () => Promise<BotIdentity>;
+  /**
+   * Dedup cache for inbound `message_id`s. Defaults to an in-memory
+   * LRU; production injects a `PersistentDedup` so that a message which
+   * killed the process is not reprocessed after launchd restarts us and
+   * Lark redelivers the event.
+   */
+  dedup?: DedupChecker;
 }
 
 export class FeishuGateway {
   private readonly lark: LarkClient;
   private readonly wsClient: WSClient;
-  private readonly dedup = new LruDedup(1000);
+  private readonly dedup: DedupChecker;
   private readonly logger: Logger;
   private readonly access: AccessControl;
   private readonly feishuClient: FeishuClient;
@@ -100,6 +107,7 @@ export class FeishuGateway {
 
   constructor(opts: FeishuGatewayOptions) {
     this.lark = opts.lark;
+    this.dedup = opts.dedup ?? new LruDedup(1000);
     this.logger = opts.logger.child({ component: "feishu-gateway" });
     this.access = opts.access;
     this.feishuClient = opts.feishuClient;

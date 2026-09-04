@@ -86,9 +86,17 @@ export function createSdkQueryFn(opts: SdkQueryFnOptions): QueryFn {
       mode: "default" | "acceptEdits" | "plan",
     ): void => {
       try {
-        void (q as { setPermissionMode?: (m: string) => Promise<void> }).setPermissionMode?.(
-          mode,
-        );
+        const pending = (
+          q as { setPermissionMode?: (m: string) => Promise<void> }
+        ).setPermissionMode?.(mode);
+        // `setPermissionMode` is async: a bare `void` would leave its
+        // rejection floating, and a turn that is already tearing down
+        // (aborted, or the CLI died) rejects it. Mid-turn permission
+        // changes are best-effort, so swallow-and-log rather than let
+        // the failure escape as an unhandled rejection.
+        void pending?.catch?.((err: unknown) => {
+          opts.logger.warn({ err, mode }, "sdk-query setPermissionMode rejected");
+        });
       } catch (err) {
         opts.logger.warn({ err, mode }, "sdk-query setPermissionMode threw");
       }

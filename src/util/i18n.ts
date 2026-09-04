@@ -22,6 +22,18 @@ const STRINGS = {
     statsLine: (seconds: string, input: string, output: string) =>
       `✅ 本轮耗时 ${seconds}s · 输入 ${input} / 输出 ${output} tokens`,
     errorLine: (message: string) => `❌ 错误: ${message}`,
+    turnFailed: (reason: string) => `❌ 本次执行失败：${reason}`,
+    turnFailedAuth: (cliName: string, loginHint: string, reason: string) =>
+      [
+        `❌ 本次执行失败：${cliName} 未登录（${reason}）`,
+        "",
+        `请在运行本 bridge 的那台机器上完成登录：${loginHint}`,
+        "登录后直接重发这条消息即可，bridge 不需要重启。",
+      ].join("\n"),
+    loginHintClaude:
+      "打开终端，运行 `claude`，在里面输入 `/login` 并完成授权。",
+    loginHintCodex:
+      "打开终端，运行 `codex login`（或运行 `codex` 后输入 `/login`）并完成授权。",
     queued: (position: number) =>
       `📥 已加入队列 #${position}（当前有一个轮次在运行，发 \`/stop\` 可取消）`,
     stopped: "🛑 已停止",
@@ -198,6 +210,18 @@ const STRINGS = {
     statsLine: (seconds: string, input: string, output: string) =>
       `✅ Done in ${seconds}s · input ${input} / output ${output} tokens`,
     errorLine: (message: string) => `❌ Error: ${message}`,
+    turnFailed: (reason: string) => `❌ This turn failed: ${reason}`,
+    turnFailedAuth: (cliName: string, loginHint: string, reason: string) =>
+      [
+        `❌ This turn failed: ${cliName} is not logged in (${reason})`,
+        "",
+        `Log in on the machine running this bridge: ${loginHint}`,
+        "Then just resend this message — the bridge does not need a restart.",
+      ].join("\n"),
+    loginHintClaude:
+      "open a terminal, run `claude`, then type `/login` and complete the flow.",
+    loginHintCodex:
+      "open a terminal, run `codex login` (or run `codex` then type `/login`) and complete the flow.",
     queued: (position: number) =>
       `📥 Queued as #${position} (a turn is running — send \`/stop\` to cancel)`,
     stopped: "🛑 Stopped",

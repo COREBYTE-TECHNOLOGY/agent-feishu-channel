@@ -18,7 +18,7 @@
 
 **不发布到 npm。** `package.json` 已标记 `"private": true`；只从源码运行（见下）。
 
-### 相对上游的七项改动
+### 相对上游的八项改动
 
 | # | 改动 | 配置键 / 位置 |
 |---|------|---------------|
@@ -28,6 +28,7 @@
 | 4 | **锁定工作目录**：`agent.locked_cwd`（默认 `true`）。开启时 `/cd` 只接受 `agent.default_cwd` 自身或其子目录（`path.resolve` + 前缀判断，`..` 与同名前缀均被拦截）；`[projects]` 别名在配置加载时校验必须位于 `default_cwd` 内；`/config set *default_cwd` 被拒绝。 | `[agent].locked_cwd` |
 | 5 | **权限卡片去掉 `allow_session` 按钮**：不再有会话级「一直允许」。保留 允许 / 拒绝 / 本轮 acceptEdits。`allow_turn` 只作用于当前 turn 的 SDK 查询，不会置位会话粘性标记（下一轮从配置 / `/mode` 重新计算）。 | `src/feishu/cards/permission-card.ts`、`src/claude/*` |
 | 6 | **文件权限**：`afc init` 写出的 `config.toml` 为 `0600`（目录 `0700`）；`state.json` 与 `/config set --persist` 回写也以 `0600` 写入。 | `src/cli.ts`、`src/persistence/state-store.ts`、`src/config.ts` |
+| 8 | **失败轮次不再拖垮进程**：一次失败的 turn 现在只做三件事——记日志、往发起会话里回一条可读的「❌ 本次执行失败：…」、保留会话可用；**进程绝不退出**。provider 未登录（`Not logged in · Please run /login`）会给出可操作提示（去那台机器上跑 `claude` 然后 `/login`；provider=codex 则是 `codex login`）。`process.on("unhandledRejection")` 改为 fatal 记录但**不退出**（`uncaughtException` 仍退出）。同时 `message_id` 去重改为落盘（`state.json` 内最近 200 条、按 1 小时老化），使重启后 Lark 重投的同一事件不会被重复处理。 | `src/agent/turn-failure.ts`、`src/util/dedup.ts`、`src/claude/session.ts`、`src/index.ts` |
 | 7 | **共享群 @提及 路由**：三个 bot 同处一个 Lark 群。新增 `access.require_mention`（默认 `true`）：群聊消息必须 @ 到本 bot（`mentions[].id.open_id` == 本 bot 的 `open_id`，启动时经 `GET /open-apis/bot/v3/info` 解析并缓存）才处理，解析失败则群聊 fail closed；单聊不受影响。同时丢弃 `sender_type != "user"` 的事件（bot 不互相触发），并在进命令路由前剥掉 `@_user_N` / `@_all` 占位符。 | `[access].require_mention`、`src/feishu/mentions.ts`、`src/feishu/gateway.ts` |
 
 ### 共享群模型（三个 bot 一个群）
@@ -64,6 +65,36 @@ provider=codex，跑在 B 的 Mac）**共用同一个 Lark 群**，不是一 bot
 `@_user_1 /stop`。`src/feishu/mentions.ts` 在进命令路由前把这些占位符剥掉
 （`@corebyte-claude /stop` → `/stop`；`@corebyte-claude 看下这个 PR` →
 `看下这个 PR`），否则任何以 `/` 开头的命令都无法解析。
+
+### 失败轮次与崩溃回环（改动 8）
+
+2026-09-04 线上现象：A 的 Mac 上桥接由 launchd 托管（`KeepAlive=true`），
+`claude` CLI 登录态失效后，一条消息把进程打挂，21 秒内重启三次：
+
+```
+level 50  "Claude turn failed" · "Claude Code returned an error result: Not logged in · Please run /login"
+level 60  "Unhandled promise rejection"
+<进程退出 → launchd 拉起 → Lark 重投同一事件 → 再挂>
+```
+
+两个原因，各修一半：
+
+1. **逃逸的 promise**。`ClaudeSession.submit()` 把 `done` deferred 交还给
+   调用方，但 `src/index.ts` 在挂上 rejection handler **之前** 先 `await`
+   了一次状态卡片的网络往返。provider 瞬时失败（未登录就是）时，这个
+   promise 在无人观察的状态下 reject，Node 报 `unhandledRejection`，
+   进程自杀。现在 session 在创建 deferred 的同一刻就挂上惰性 catch，
+   `index.ts` 也改为先把结果 promise 转成已观察的值再去发卡片；
+   `sdk-query.ts` 里 `setPermissionMode()` 的浮空 promise 一并修掉。
+2. **内存态去重**。重启后去重缓存清空，Lark 重投的同一 `message_id`
+   被再次处理——这才是把「一次失败」放大成「回环」的东西。去重环现在
+   随 `state.json` 落盘（最近 200 条 + 1 小时老化，0600）。这是
+   **防回环，不是 exactly-once**：环有界、写入尽力而为，重复处理是可
+   接受结果，唯一保证是被反复重投的事件不会永远被反复处理。
+
+`unhandledRejection` 现在只记 fatal 日志、**不退出**：聊天桥接必须活过
+单次坏轮次，而退出在 launchd 下反而制造回环。`uncaughtException` 仍然
+退出——同步抛栈可能留下半改状态，没法安全推断还剩什么。
 
 ### 从源码运行
 
