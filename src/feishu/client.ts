@@ -8,6 +8,63 @@ export interface SendTextResult {
   messageId: string;
 }
 
+/**
+ * COREBYTE hardening: this app's own identity, used by the gateway to
+ * decide whether an @mention in the shared group is addressed to THIS
+ * bot or to one of the other two COREBYTE bots living in the same
+ * group. Both fields are optional: the Lark bot-info endpoint is not
+ * covered by the SDK's generated types, so we parse defensively.
+ */
+export interface BotIdentity {
+  /** The bot's own open_id, matched against `message.mentions[].id.open_id`. */
+  openId?: string;
+  /** The bot's display name, used only as a fallback when openId is missing. */
+  appName?: string;
+}
+
+/**
+ * Extract `{ openId, appName }` from a `GET /open-apis/bot/v3/info`
+ * response.
+ *
+ * The endpoint is a legacy one and is NOT described by the
+ * `@larksuiteoapi/node-sdk` generated types, so the exact envelope
+ * cannot be verified from the types we ship with. Documented responses
+ * put the payload under a top-level `bot` object, while most modern
+ * Lark endpoints wrap payloads in `data`. We therefore accept all of
+ * `bot`, `data.bot`, `data` and the top level itself, and return
+ * whatever we find. Unknown/garbage payloads yield an empty identity
+ * rather than throwing — the caller decides what to do with that
+ * (the gateway fails closed in group chats).
+ */
+export function extractBotIdentity(payload: unknown): BotIdentity {
+  const asRecord = (v: unknown): Record<string, unknown> | undefined =>
+    typeof v === "object" && v !== null ? (v as Record<string, unknown>) : undefined;
+
+  const root = asRecord(payload);
+  const data = asRecord(root?.["data"]);
+  const candidates = [
+    asRecord(root?.["bot"]),
+    asRecord(data?.["bot"]),
+    data,
+    root,
+  ].filter((c): c is Record<string, unknown> => c !== undefined);
+
+  const pick = (key: string): string | undefined => {
+    for (const candidate of candidates) {
+      const value = candidate[key];
+      if (typeof value === "string" && value.length > 0) return value;
+    }
+    return undefined;
+  };
+
+  const identity: BotIdentity = {};
+  const openId = pick("open_id");
+  if (openId) identity.openId = openId;
+  const appName = pick("app_name");
+  if (appName) identity.appName = appName;
+  return identity;
+}
+
 export class FeishuClient {
   constructor(private readonly lark: LarkClient) {}
 
@@ -264,6 +321,32 @@ export class FeishuClient {
     throw new Error(
       `downloadImage: unexpected response type ${(data as { constructor?: { name?: string } } | null)?.constructor?.name ?? typeof data}`,
     );
+  }
+  /**
+   * Fetch this app's own bot identity via `GET /open-apis/bot/v3/info`.
+   *
+   * Called once at gateway startup. Throws on transport failure or a
+   * non-zero Lark `code`; the gateway logs and fails closed for group
+   * chats when that happens.
+   */
+  async getBotIdentity(): Promise<BotIdentity> {
+    const response = await withTimeout(
+      this.lark.request<unknown>({
+        method: "GET",
+        url: "/open-apis/bot/v3/info",
+      }),
+      "Feishu getBotIdentity",
+    );
+
+    const code = (response as { code?: unknown } | null)?.code;
+    if (typeof code === "number" && code !== 0) {
+      const msg = (response as { msg?: unknown }).msg;
+      throw new Error(
+        `Feishu getBotIdentity failed: code=${code} msg=${typeof msg === "string" ? msg : ""}`,
+      );
+    }
+
+    return extractBotIdentity(response);
   }
 }
 

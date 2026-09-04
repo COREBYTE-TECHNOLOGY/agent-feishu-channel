@@ -3,6 +3,7 @@ import type { ReceiveV1Event } from "./types.js";
 import type { IncomingMessage } from "../types.js";
 import { detectImageMime } from "./image-mime.js";
 import { parsePost, type ParsedPost } from "./post-parser.js";
+import { stripMentions } from "./mentions.js";
 
 export interface FeishuImageClient {
   downloadImage(messageId: string, imageKey: string): Promise<Buffer>;
@@ -27,7 +28,13 @@ export async function translateReceiveEvent(
   if (msgType === "text") {
     try {
       const parsed = JSON.parse(event.message.content) as { text?: string };
-      text = parsed.text ?? "";
+      // COREBYTE hardening: strip Lark's inline @mention placeholders
+      // (`@_user_1`, `@_all`) before anything downstream sees the text.
+      // In the shared COREBYTE group every message addressed to this bot
+      // starts with a mention, so without this "@corebyte-claude /stop"
+      // would reach the command router as "@_user_1 /stop" and never
+      // parse as a command.
+      text = stripMentions(parsed.text ?? "", event.message.mentions);
     } catch (err) {
       log.error({ err }, "Failed to parse text message content");
       return null;
@@ -55,7 +62,7 @@ export async function translateReceiveEvent(
       log.error({ err }, "Failed to parse post message content");
       return null;
     }
-    text = parsed.text;
+    text = stripMentions(parsed.text, event.message.mentions);
 
     if (parsed.imageKeys.length > 0) {
       try {

@@ -29,6 +29,11 @@ const AccessSchema = z.object({
     .array(z.string().min(1))
     .min(1, "at least one chat_id is required"),
   unauthorized_behavior: z.enum(["ignore", "reject"]).default("ignore"),
+  // COREBYTE hardening (shared-group model): all three COREBYTE bots live
+  // in ONE Lark group, and the @mention is what routes a message to one of
+  // them. Default true: in a group chat the bridge only handles messages
+  // that @mention its own bot. p2p chats are never gated.
+  require_mention: z.boolean().default(true),
 });
 
 // COREBYTE hardening: `bypassPermissions` removed on purpose — a config that
@@ -362,6 +367,7 @@ export async function loadConfig(path: string): Promise<AppConfig> {
       allowedOpenIds: data.access.allowed_open_ids,
       allowedChatIds: data.access.allowed_chat_ids,
       unauthorizedBehavior: data.access.unauthorized_behavior,
+      requireMention: data.access.require_mention,
     },
     agent: {
       defaultProvider: agent.default_provider,

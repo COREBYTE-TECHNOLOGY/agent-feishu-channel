@@ -74,6 +74,12 @@ export interface LoadedAppConfig {
     /** COREBYTE hardening: events from any other chat_id are dropped. */
     allowedChatIds: readonly string[];
     unauthorizedBehavior: "ignore" | "reject";
+    /**
+     * COREBYTE hardening: require an @mention of this bot before handling
+     * a group message (default true). The three COREBYTE bots share one
+     * Lark group; the mention is the routing mechanism. p2p is unaffected.
+     */
+    requireMention: boolean;
   };
   agent: AgentConfig;
   claude: ClaudeProviderConfig & {

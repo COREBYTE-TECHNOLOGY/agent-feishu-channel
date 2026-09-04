@@ -45,6 +45,23 @@ allowed_chat_ids = [
   "oc_your_group_chat_id_here",
 ]
 
+# COREBYTE 共享群模型：corebyte-hermes / corebyte-claude / corebyte-codex
+# 三个 bot 同处 *一个* Lark 群，靠 @提及 路由。
+#
+# true（默认）= 群聊里只处理 @ 到本 bot 的消息：事件中
+# message.mentions[].id.open_id 必须等于本 bot 自己的 open_id（启动时通过
+# GET /open-apis/bot/v3/info 解析并缓存；解析失败则群聊消息一律丢弃，即
+# fail closed）。单聊（chat_type = "p2p"）不受此开关影响。
+#
+# 另外：任何 sender_type 不是 "user" 的事件（Lark 用 "app" 表示机器人）
+# 都会被丢弃，三个 bot 不会互相触发。
+#
+# ⚠️ 千万不要给这三个应用申请「获取群组中所有消息 / im:message.group_msg」
+# 权限。没有该权限时，Lark 只会把 @ 到本 bot 的群消息推过来；一旦授予，
+# 每个 bot 都能看到群里全部消息（包括另外两个 bot 的消息和它们的输出），
+# 本开关就成了唯一防线，而权限本身也远超所需。
+require_mention = true
+
 # ─── Agent defaults ──────────────────────────────────────────────────
 [agent]
 # Which provider new sessions should use by default.

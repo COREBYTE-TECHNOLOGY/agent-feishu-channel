@@ -18,7 +18,7 @@
 
 **不发布到 npm。** `package.json` 已标记 `"private": true`；只从源码运行（见下）。
 
-### 相对上游的六项改动
+### 相对上游的七项改动
 
 | # | 改动 | 配置键 / 位置 |
 |---|------|---------------|
@@ -28,6 +28,42 @@
 | 4 | **锁定工作目录**：`agent.locked_cwd`（默认 `true`）。开启时 `/cd` 只接受 `agent.default_cwd` 自身或其子目录（`path.resolve` + 前缀判断，`..` 与同名前缀均被拦截）；`[projects]` 别名在配置加载时校验必须位于 `default_cwd` 内；`/config set *default_cwd` 被拒绝。 | `[agent].locked_cwd` |
 | 5 | **权限卡片去掉 `allow_session` 按钮**：不再有会话级「一直允许」。保留 允许 / 拒绝 / 本轮 acceptEdits。`allow_turn` 只作用于当前 turn 的 SDK 查询，不会置位会话粘性标记（下一轮从配置 / `/mode` 重新计算）。 | `src/feishu/cards/permission-card.ts`、`src/claude/*` |
 | 6 | **文件权限**：`afc init` 写出的 `config.toml` 为 `0600`（目录 `0700`）；`state.json` 与 `/config set --persist` 回写也以 `0600` 写入。 | `src/cli.ts`、`src/persistence/state-store.ts`、`src/config.ts` |
+| 7 | **共享群 @提及 路由**：三个 bot 同处一个 Lark 群。新增 `access.require_mention`（默认 `true`）：群聊消息必须 @ 到本 bot（`mentions[].id.open_id` == 本 bot 的 `open_id`，启动时经 `GET /open-apis/bot/v3/info` 解析并缓存）才处理，解析失败则群聊 fail closed；单聊不受影响。同时丢弃 `sender_type != "user"` 的事件（bot 不互相触发），并在进命令路由前剥掉 `@_user_N` / `@_all` 占位符。 | `[access].require_mention`、`src/feishu/mentions.ts`、`src/feishu/gateway.ts` |
+
+### 共享群模型（三个 bot 一个群）
+
+`corebyte-hermes`（GitHub ↔ Lark 控制面，独立代码库）、`corebyte-claude`
+（本桥接，provider=claude，跑在 A 的 Mac）、`corebyte-codex`（本桥接，
+provider=codex，跑在 B 的 Mac）**共用同一个 Lark 群**，不是一 bot 一群。
+
+路由机制就是 **@提及**：
+
+- 平台行为：群里的 bot 只会收到 **@ 了自己** 的消息的 `im.message.receive_v1`
+  事件——除非该应用被授予「获取群组中所有消息 / `im:message.group_msg`」权限。
+- 本分支策略：**三个应用都不申请该权限**。
+
+  > ⚠️ 一旦授予「获取群组中所有消息」，每个 bot 都能看到群里的全部消息，
+  > 包括另外两个 bot 的消息和它们的输出——这正是 bot 互相触发、串台的来源。
+  > 需要的只有 `im:message.receive_v1` 这一条事件订阅，不要加这条权限。
+
+代码侧两道闸（`src/feishu/gateway.ts`）：
+
+1. **@提及闸**（`access.require_mention`，默认 `true`）：`chat_type` 不是
+   `"p2p"` 时，`message.mentions[].id.open_id` 必须命中本 bot 自己的
+   `open_id`，否则静默丢弃。本 bot 的 `open_id` 在 `start()` 时经
+   `GET /open-apis/bot/v3/info` 解析一次并缓存；拿不到 `open_id` 时退化为
+   按 `app_name` 匹配 `mentions[].name`；两者都拿不到就**丢弃群聊消息**
+   （fail closed，不是 fail open）。该闸跑在 `open_id` 白名单校验**之前**，
+   所以发给另外两个 bot 的消息不会被本 bot 回一句「Unauthorized sender」。
+2. **bot 发送方闸**：`sender.sender_type` 明确不是 `"user"`（Lark 用
+   `"app"` 表示机器人）的事件一律丢弃，debug 级日志。字段缺失时按人类处理，
+   避免上游 payload 变动把整个桥接静音。
+
+另外，Lark 把 @ 提及以 `@_user_1` / `@_all` 占位符的形式内联在
+`message.content` 里，所以 `@corebyte-claude /stop` 实际收到的是
+`@_user_1 /stop`。`src/feishu/mentions.ts` 在进命令路由前把这些占位符剥掉
+（`@corebyte-claude /stop` → `/stop`；`@corebyte-claude 看下这个 PR` →
+`看下这个 PR`），否则任何以 `/` 开头的命令都无法解析。
 
 ### 从源码运行
 
@@ -40,18 +76,19 @@ pnpm build
 node dist/cli.js init              # 生成 ~/.agent-feishu-channel/config.toml（0600）
 vim ~/.agent-feishu-channel/config.toml
 #   [feishu]  domain = "lark"，填 app_id / app_secret
-#   [access]  allowed_open_ids + allowed_chat_ids（必填）
+#   [access]  allowed_open_ids + allowed_chat_ids（必填）；require_mention 默认 true
 #   [agent]   default_cwd（/cd 与 [projects] 都被锁在这个目录内）
 
 node dist/cli.js -c ~/.agent-feishu-channel/config.toml
 ```
 
-校验：`pnpm test`（vitest，618 用例）、`pnpm typecheck`。
+校验：`pnpm test`（vitest，662 用例）、`pnpm typecheck`。
 
 ### 上游同步
 
 只从 `ddb873b` 之后的上游提交 cherry-pick / rebase，合并前重新审计
-`bypassPermissions`、`allow_session`、`danger-full-access` 是否被重新引入（`grep -rn` 一遍 `src/`）。
+`bypassPermissions`、`allow_session`、`danger-full-access` 是否被重新引入（`grep -rn` 一遍 `src/`），
+以及 `im.message.receive_v1` 的处理链上 @提及闸 / bot 发送方闸是否仍在 `open_id` 校验之前。
 
 ---
 
@@ -165,7 +202,7 @@ See [`config.example.toml`](config.example.toml) for all options with comments.
 | Section | Keys | Description |
 |---------|------|-------------|
 | `[feishu]` | `domain` (`lark` default / `feishu`), `app_id`, `app_secret`, `encrypt_key`, `verification_token` | Lark / Feishu bot credentials |
-| `[access]` | `allowed_open_ids`, `allowed_chat_ids` (required), `unauthorized_behavior` | Who, and from which chats, can talk to the bot |
+| `[access]` | `allowed_open_ids`, `allowed_chat_ids` (required), `unauthorized_behavior`, `require_mention` (default `true`) | Who, and from which chats, can talk to the bot; in a group the message must @mention this bot |
 | `[agent]` | `default_provider`, `default_cwd`, `locked_cwd` (default `true`), `default_permission_mode`, `permission_timeout_seconds`, `permission_warn_before_seconds` | Shared defaults and legacy fallbacks |
 | `[claude]` | `default_permission_mode`, `default_model`, `default_effort`, `permission_timeout_seconds`, `permission_warn_before_seconds`, `cli_path` | Claude provider defaults |
 | `[codex]` | `default_permission_mode`, `default_model`, `default_effort`, `cli_path` | Codex provider defaults |

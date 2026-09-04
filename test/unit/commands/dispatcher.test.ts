@@ -49,6 +49,7 @@ const BASE_CONFIG: AppConfig = {
     allowedOpenIds: ["ou_alice"],
     allowedChatIds: ["oc_1"],
     unauthorizedBehavior: "ignore",
+    requireMention: true,
   },
   agent: {
     defaultProvider: "claude",

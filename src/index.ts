@@ -983,6 +983,7 @@ export async function main(configPathOverride?: string): Promise<void> {
     lark,
     feishuClient,
     access,
+    requireMention: config.access.requireMention,
     onMessage,
     onCardAction,
   });

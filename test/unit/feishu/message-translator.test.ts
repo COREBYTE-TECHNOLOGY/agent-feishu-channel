@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { translateReceiveEvent, type FeishuImageClient } from "../../../src/feishu/message-translator.js";
 import { createLogger } from "../../../src/util/logger.js";
 import type { ReceiveV1Event } from "../../../src/feishu/types.js";
+import { parseInput } from "../../../src/commands/router.js";
 
 const SILENT = createLogger({ level: "error", pretty: false });
 
@@ -122,5 +123,74 @@ describe("translateReceiveEvent — regression for existing branches", () => {
     const event = makeEvent("image", {});
     const result = await translateReceiveEvent(event, fakeClient({}), SILENT);
     expect(result).toBeNull();
+  });
+});
+
+describe("translateReceiveEvent — @mention stripping (COREBYTE hardening)", () => {
+  function mentionEvent(
+    text: string,
+    mentions?: ReceiveV1Event["message"]["mentions"],
+  ): ReceiveV1Event {
+    const event = makeEvent("text", { text });
+    if (mentions) event.message.mentions = mentions;
+    return event;
+  }
+
+  const CLAUDE = [
+    { key: "@_user_1", id: { open_id: "ou_claude_bot" }, name: "corebyte-claude" },
+  ];
+
+  it("strips the mention so a command reaches the router intact", async () => {
+    const result = await translateReceiveEvent(
+      mentionEvent("@_user_1 /stop", CLAUDE),
+      fakeClient({}),
+      SILENT,
+    );
+    expect(result!.text).toBe("/stop");
+    expect(parseInput(result!.text)).toEqual({ kind: "stop" });
+  });
+
+  it("keeps plain text intact after the mention", async () => {
+    const result = await translateReceiveEvent(
+      mentionEvent("@_user_1 看下这个 PR", CLAUDE),
+      fakeClient({}),
+      SILENT,
+    );
+    expect(result!.text).toBe("看下这个 PR");
+    expect(parseInput(result!.text)).toEqual({
+      kind: "run",
+      text: "看下这个 PR",
+    });
+  });
+
+  it("strips several mentions and @_all", async () => {
+    const result = await translateReceiveEvent(
+      mentionEvent("@_all @_user_1 @_user_2 /status", [
+        { key: "@_all", name: "all" },
+        ...CLAUDE,
+        { key: "@_user_2", id: { open_id: "ou_codex_bot" }, name: "corebyte-codex" },
+      ]),
+      fakeClient({}),
+      SILENT,
+    );
+    expect(result!.text).toBe("/status");
+  });
+
+  it("still strips placeholders when the mentions array is absent", async () => {
+    const result = await translateReceiveEvent(
+      mentionEvent("@_user_1 !urgent"),
+      fakeClient({}),
+      SILENT,
+    );
+    expect(result!.text).toBe("!urgent");
+  });
+
+  it("strips mentions from post messages too", async () => {
+    const event = makeEvent("post", {
+      content: [[{ tag: "text", text: "@_user_1 /help" }]],
+    });
+    event.message.mentions = CLAUDE;
+    const result = await translateReceiveEvent(event, fakeClient({}), SILENT);
+    expect(result!.text).toBe("/help");
   });
 });

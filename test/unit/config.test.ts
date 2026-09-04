@@ -57,6 +57,8 @@ cli_path = "claude"
     expect(cfg.feishu.verificationToken).toBe("");
     expect(cfg.access.allowedOpenIds).toEqual(["ou_test"]);
     expect(cfg.access.unauthorizedBehavior).toBe("ignore");
+    // COREBYTE hardening: shared-group model defaults to mention-gated.
+    expect(cfg.access.requireMention).toBe(true);
     expect(cfg.logging.level).toBe("info");
     expect(agent.defaultProvider).toBe("claude");
     expect(agent.defaultCwd).toBe("/tmp/cfc-test");
@@ -929,5 +931,50 @@ hide_thinking = false
 `);
     await writeConfigKey(path, "render.hide_thinking", true);
     expect(statSync(path).mode & 0o777).toBe(0o600);
+  });
+});
+
+describe("access.require_mention (COREBYTE hardening)", () => {
+  it("can be turned off explicitly", async () => {
+    const path = writeConfig(`
+[feishu]
+app_id = "cli_test"
+app_secret = "secret"
+
+[access]
+allowed_open_ids = ["ou_test"]
+allowed_chat_ids = ["oc_test"]
+require_mention = false
+
+[agent]
+default_cwd = "/tmp/cfc-test"
+
+[claude]
+default_model = "claude-opus-4-6"
+cli_path = "claude"
+`);
+    const cfg = await loadConfig(path);
+    expect(cfg.access.requireMention).toBe(false);
+  });
+
+  it("rejects a non-boolean value", async () => {
+    const path = writeConfig(`
+[feishu]
+app_id = "cli_test"
+app_secret = "secret"
+
+[access]
+allowed_open_ids = ["ou_test"]
+allowed_chat_ids = ["oc_test"]
+require_mention = "yes"
+
+[agent]
+default_cwd = "/tmp/cfc-test"
+
+[claude]
+default_model = "claude-opus-4-6"
+cli_path = "claude"
+`);
+    await expect(loadConfig(path)).rejects.toThrow(ConfigError);
   });
 });
