@@ -30,6 +30,7 @@
 | 6 | **文件权限**：`afc init` 写出的 `config.toml` 为 `0600`（目录 `0700`）；`state.json` 与 `/config set --persist` 回写也以 `0600` 写入。 | `src/cli.ts`、`src/persistence/state-store.ts`、`src/config.ts` |
 | 8 | **失败轮次不再拖垮进程**：一次失败的 turn 现在只做三件事——记日志、往发起会话里回一条可读的「❌ 本次执行失败：…」、保留会话可用；**进程绝不退出**。provider 未登录（`Not logged in · Please run /login`）会给出可操作提示（去那台机器上跑 `claude` 然后 `/login`；provider=codex 则是 `codex login`）。`process.on("unhandledRejection")` 改为 fatal 记录但**不退出**（`uncaughtException` 仍退出）。同时 `message_id` 去重改为落盘（`state.json` 内最近 200 条、按 1 小时老化），使重启后 Lark 重投的同一事件不会被重复处理。 | `src/agent/turn-failure.ts`、`src/util/dedup.ts`、`src/claude/session.ts`、`src/index.ts` |
 | 7 | **共享群 @提及 路由**：三个 bot 同处一个 Lark 群。新增 `access.require_mention`（默认 `true`）：群聊消息必须 @ 到本 bot（`mentions[].id.open_id` == 本 bot 的 `open_id`，启动时经 `GET /open-apis/bot/v3/info` 解析并缓存）才处理，解析失败则群聊 fail closed；单聊不受影响。同时丢弃 `sender_type != "user"` 的事件（bot 不互相触发），并在进命令路由前剥掉 `@_user_N` / `@_all` 占位符。 | `[access].require_mention`、`src/feishu/mentions.ts`、`src/feishu/gateway.ts` |
+| 10 | **`state.json` 写入串行化**：第 8 项的落盘去重上线后，线上日志出现 `Failed to persist message dedup ring … ENOENT rename state.json.tmp`——去重 flush、`SessionManager.saveNow()`、关停三处并发调 `save()`，都用同一个固定 `.tmp` 再 rename，后者把前者的临时文件抢走。现在 `save()` 排队执行（后到者等前者落盘；某次失败不阻塞后续），每次写唯一临时名 `state.json.<pid>.<seq>.tmp`，写完即 rename。另：Lark 应用需授予 `cardkit:card:read`，否则每张状态卡都会先报 `idConvert failed (99991672)` 再降级到 `patchCard`（功能可用，日志噪音）。 | `src/persistence/state-store.ts`；Lark 后台权限 |
 | 9 | **有作用域的免卡片放行（治审批疲劳）**：线上一次 Lark 对话产生 81 张权限卡片（51 `Bash` / 29 `Read` / 1 `Skill`），人类点了 97 次「一律同意」——点到第 97 次的人不在审阅任何一张卡片。新增 `access.auto_approve_readonly`（默认 `true`）：只读工具（`Read`/`Glob`/`Grep`/`LS`/`NotebookRead`，以及无路径的 `TodoWrite`）在输入里每一个路径都落在会话 cwd 子树内时直接放行（`~` 先展开，`fs.realpath` 解析，软链接逃逸算越界）。新增 `access.honor_project_permissions`（默认 `true`）：`Bash` 先查项目自己的 `<cwd>/.claude/settings.json`（向上合并到 git 根或 `agent.default_cwd`，深层优先，按 mtime 缓存）里 `Bash(...)` 形式的 allow / deny 规则，**deny 永远优先**。**改状态与出网的工具永远出卡片**：未命中 allow 的 `Bash`、`Write`、`Edit`、`MultiEdit`、`NotebookEdit`、`WebFetch`、`WebSearch`、`Task`、`Skill`，以及任何 `mcp__` 前缀工具。每次放行打 info 日志（`reason` = `readonly-in-cwd` / `project-allow-rule:<规则>`），`/status` 显示本会话累计放行次数。 | `[access].auto_approve_readonly`、`[access].honor_project_permissions`、`src/claude/auto-approve.ts` |
 
 ### 免卡片放行决策表（第 9 项）
@@ -70,6 +71,11 @@ provider=codex，跑在 B 的 Mac）**共用同一个 Lark 群**，不是一 bot
   > ⚠️ 一旦授予「获取群组中所有消息」，每个 bot 都能看到群里的全部消息，
   > 包括另外两个 bot 的消息和它们的输出——这正是 bot 互相触发、串台的来源。
   > 需要的只有 `im:message.receive_v1` 这一条事件订阅，不要加这条权限。
+
+- 应用需要的权限（scope）：`im:message`、`im:message:send_as_bot`、`im:chat:readonly`、
+  `contact:user.base:readonly`、**`cardkit:card:read`**（状态/思考/工具活动卡片的 `id_convert`
+  需要它；缺了会降级到 `patchCard`，可用但每张卡先报一次 99991672）。回调订阅里除
+  `im.message.receive_v1` 外还要有 **`card.action.trigger`**（权限卡片的按钮点击靠它回到进程）。
 
 代码侧两道闸（`src/feishu/gateway.ts`）：
 

@@ -166,6 +166,16 @@ export class StateStore {
    * reflush the file without needing a `State` from its caller.
    */
   private lastState: State = structuredClone(INITIAL_STATE);
+  /**
+   * Serialises every write. Three independent callers (the dedup ring
+   * flush, `SessionManager.saveNow()`, and shutdown) used to race on the
+   * same `${path}.tmp`: writer B's `writeFile` truncated the file writer A
+   * was about to `rename`, or A's `rename` moved it away before B's, so
+   * B failed with ENOENT (seen in production: "Failed to persist message
+   * dedup ring … ENOENT rename state.json.tmp"). corebyte Issue #22.
+   */
+  private writeChain: Promise<void> = Promise.resolve();
+  private tmpSeq = 0;
 
   constructor(private readonly path: string) {}
 
@@ -242,10 +252,27 @@ export class StateStore {
     return state;
   }
 
-  async save(state: State): Promise<void> {
+  /**
+   * Persist `state` atomically. Writes are queued so they never overlap:
+   * each call waits for the previous write to finish, then snapshots the
+   * *current* `lastState` + dedup ring and writes them. Last caller wins,
+   * and every caller's promise settles only after its own write landed.
+   * A failed write does not poison the chain for later callers.
+   */
+  save(state: State): Promise<void> {
     this.lastState = state;
+    const run = this.writeChain.then(() => this.writeAtomic());
+    this.writeChain = run.catch(() => undefined);
+    return run;
+  }
+
+  private async writeAtomic(): Promise<void> {
     await mkdir(dirname(this.path), { recursive: true });
-    const tmp = `${this.path}.tmp`;
+    // Unique per write: a fixed `${path}.tmp` was the other half of the
+    // race — even serialised, a crash between write and rename would
+    // otherwise leave a tmp file the next write silently overwrote.
+    const tmp = `${this.path}.${process.pid}.${++this.tmpSeq}.tmp`;
+    const state = this.lastState;
     // The dedup ring is merged in from the store rather than taken from
     // `state`, so a caller that builds a fresh `State` (SessionManager)
     // cannot drop it. Omitted entirely when empty to keep the file — and
