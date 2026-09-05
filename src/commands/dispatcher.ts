@@ -364,6 +364,12 @@ export class CommandDispatcher {
       s.statusInputTokens(status.totalInputTokens),
       s.statusOutputTokens(status.totalOutputTokens),
       s.statusQueueLen(status.queueLength),
+      // COREBYTE hardening: only shown once something was waved
+      // through, so a session that carded everything reads exactly as
+      // it did before scoped auto-approve existed.
+      ...(status.autoApprovedCount > 0
+        ? [s.statusAutoApproved(status.autoApprovedCount)]
+        : []),
     ];
 
     await this.feishu.replyText(ctx.parentMessageId, lines.join("\n"));

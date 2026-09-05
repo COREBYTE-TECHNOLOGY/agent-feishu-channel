@@ -15,6 +15,7 @@ import type { CanUseToolFn, QueryFn, QueryHandle } from "./query-handle.js";
 import type { PermissionBroker } from "./permission-broker.js";
 import type { QuestionBroker } from "./question-broker.js";
 import { createAskUserMcpServer } from "./ask-user-mcp.js";
+import type { AutoApprover } from "./auto-approve.js";
 import type { CommandRouterResult } from "../commands/router.js";
 import {
   extractToolResultText,
@@ -123,6 +124,8 @@ export interface SessionStatus {
   contextInputTokens?: number;
   contextWindowTokens?: number;
   queueLength: number;
+  /** COREBYTE hardening: tool calls this session auto-approved (no card). */
+  autoApprovedCount: number;
   providerSessionId?: string;
   createdAt: string;
   lastActiveAt: string;
@@ -137,6 +140,11 @@ export interface ClaudeSessionOptions {
   permissionBroker: PermissionBroker;
   questionBroker: QuestionBroker;
   logger: Logger;
+  /**
+   * COREBYTE hardening: scoped auto-approve. When absent every tool
+   * call posts a permission card, i.e. the pre-hardening behaviour.
+   */
+  autoApprover?: AutoApprover;
   onSessionIdCaptured?: () => void;
   onTurnComplete?: () => void;
 }
@@ -230,6 +238,7 @@ export class ClaudeSession {
   private readonly clock: Clock;
   private readonly permissionBroker: PermissionBroker;
   private readonly questionBroker: QuestionBroker;
+  private readonly autoApprover: AutoApprover | undefined;
   private readonly mcpServers: readonly McpServerConfig[];
   private readonly logger: Logger;
   private readonly mutex = new Mutex();
@@ -263,6 +272,13 @@ export class ClaudeSession {
   private turnCount = 0;
   private totalInputTokens = 0;
   private totalOutputTokens = 0;
+  /**
+   * COREBYTE hardening: how many tool calls skipped the permission
+   * card this session. Surfaced by /status so the operator can see at
+   * a glance how much was waved through, and cross-check it against
+   * the "canUseTool: auto-approved" info lines in the log.
+   */
+  private autoApprovedCount = 0;
   private currentContextInputTokens: number | undefined;
   private contextWindowTokens: number | undefined;
   private claudeSessionId: string | undefined;
@@ -284,6 +300,7 @@ export class ClaudeSession {
     this.clock = opts.clock;
     this.permissionBroker = opts.permissionBroker;
     this.questionBroker = opts.questionBroker;
+    this.autoApprover = opts.autoApprover;
     this.mcpServers = opts.mcpServers ?? [];
     this.logger = opts.logger.child({ chat_id: opts.chatId });
     if (opts.onSessionIdCaptured !== undefined) {
@@ -1119,6 +1136,7 @@ export class ClaudeSession {
         ? { contextWindowTokens: this.contextWindowTokens }
         : {}),
       queueLength: this.inputQueue.length,
+      autoApprovedCount: this.autoApprovedCount,
       ...(this.claudeSessionId !== undefined
         ? { providerSessionId: this.claudeSessionId }
         : {}),
@@ -1296,6 +1314,36 @@ export class ClaudeSession {
           "canUseTool: auto-allow mcp__feishu__*",
         );
         return { behavior: "allow", updatedInput: rawInput };
+      }
+
+      // COREBYTE hardening: scoped auto-approve. One real Lark
+      // conversation produced 81 permission cards (51 Bash / 29 Read /
+      // 1 Skill) and the operator clicked 一律同意 97 times — at that
+      // volume nobody is reading the cards, which is worse security
+      // than a narrow, logged, auditable auto-approve. Only read-only
+      // tools that stay inside the session cwd and Bash commands the
+      // project's own committed `.claude/settings.json` already allows
+      // can skip the card; everything that changes state or reaches the
+      // network still goes to the broker. `decide()` never throws — it
+      // reports "card it" on any failure.
+      if (this.autoApprover !== undefined) {
+        const decision = await this.autoApprover.decide(
+          toolName,
+          rawInput,
+          this.config.defaultCwd,
+        );
+        if (decision.approve) {
+          this.autoApprovedCount += 1;
+          this.logger.info(
+            { tool_name: toolName, reason: decision.reason },
+            "canUseTool: auto-approved without card",
+          );
+          return { behavior: "allow", updatedInput: rawInput };
+        }
+        this.logger.debug(
+          { tool_name: toolName, reason: decision.reason },
+          "canUseTool: not auto-approved; posting permission card",
+        );
       }
 
       // Flip into awaiting_permission while we wait on the broker.

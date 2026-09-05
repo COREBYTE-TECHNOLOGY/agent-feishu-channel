@@ -80,6 +80,18 @@ export interface LoadedAppConfig {
      * Lark group; the mention is the routing mechanism. p2p is unaffected.
      */
     requireMention: boolean;
+    /**
+     * COREBYTE hardening: auto-approve read-only tools (Read/Glob/Grep/
+     * LS/NotebookRead/TodoWrite) whose paths all stay inside the session
+     * cwd, instead of posting a permission card for each. Default true.
+     */
+    autoApproveReadonly: boolean;
+    /**
+     * COREBYTE hardening: apply the project's own committed
+     * `.claude/settings.json` permissions.deny / permissions.allow rules
+     * to Bash commands. Default true.
+     */
+    honorProjectPermissions: boolean;
   };
   agent: AgentConfig;
   claude: ClaudeProviderConfig & {

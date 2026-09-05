@@ -3,6 +3,7 @@ import { ClaudeSession, type QueryFn, type SessionStatus } from "./session.js";
 import type { Clock, TimeoutHandle } from "../util/clock.js";
 import type { PermissionBroker } from "./permission-broker.js";
 import type { QuestionBroker } from "./question-broker.js";
+import type { AutoApprover } from "./auto-approve.js";
 import type {
   AgentProvider,
   AppConfig,
@@ -27,6 +28,8 @@ export interface ClaudeSessionManagerOptions {
   clock: Clock;
   permissionBroker: PermissionBroker;
   questionBroker: QuestionBroker;
+  /** COREBYTE hardening: scoped auto-approve; omit to card everything. */
+  autoApprover?: AutoApprover;
   logger: Logger;
   stateStore?: StateStore;
   feishuClient?: FeishuClient;
@@ -245,6 +248,9 @@ export class ClaudeSessionManager {
       clock: this.opts.clock,
       permissionBroker: this.opts.permissionBroker,
       questionBroker: this.opts.questionBroker,
+      ...(this.opts.autoApprover !== undefined
+        ? { autoApprover: this.opts.autoApprover }
+        : {}),
       logger: this.opts.logger,
       onSessionIdCaptured: () => void this.saveNow(),
       onTurnComplete: () => this.scheduleDebouncedSave(),

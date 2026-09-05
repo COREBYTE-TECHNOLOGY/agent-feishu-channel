@@ -10,6 +10,7 @@ import { FeishuGateway, toLarkDomain } from "./feishu/gateway.js";
 import { checkClaudeCli } from "./claude/preflight.js";
 import { createSdkQueryFn } from "./claude/sdk-query.js";
 import { ClaudeSessionManager } from "./claude/session-manager.js";
+import { AutoApprover } from "./claude/auto-approve.js";
 import { checkCodexCli } from "./codex/preflight.js";
 import { checkCodexSdkInstalled, createCodexQueryFn } from "./codex/sdk-run.js";
 import { InterruptedError } from "./claude/session.js";
@@ -171,6 +172,19 @@ export async function main(configPathOverride?: string): Promise<void> {
     },
   });
 
+  // COREBYTE hardening: scoped auto-approve. Read-only tools that stay
+  // inside the session cwd, and Bash commands the project's committed
+  // `.claude/settings.json` already allows, resolve without a card;
+  // everything else still goes to the permission broker.
+  const autoApprover = new AutoApprover({
+    config: {
+      autoApproveReadonly: config.access.autoApproveReadonly,
+      honorProjectPermissions: config.access.honorProjectPermissions,
+    },
+    boundaryCwd: config.agent.defaultCwd,
+    logger,
+  });
+
   const sessionManager = new ClaudeSessionManager({
     config: config.claude,
     mcpServers: config.mcp,
@@ -185,6 +199,7 @@ export async function main(configPathOverride?: string): Promise<void> {
     clock,
     permissionBroker,
     questionBroker,
+    autoApprover,
     logger,
     stateStore,
     feishuClient,

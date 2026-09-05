@@ -50,6 +50,8 @@ const BASE_CONFIG: AppConfig = {
     allowedChatIds: ["oc_1"],
     unauthorizedBehavior: "ignore",
     requireMention: true,
+    autoApproveReadonly: true,
+    honorProjectPermissions: true,
   },
   agent: {
     defaultProvider: "claude",

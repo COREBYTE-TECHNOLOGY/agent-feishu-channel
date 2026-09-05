@@ -18,7 +18,7 @@
 
 **不发布到 npm。** `package.json` 已标记 `"private": true`；只从源码运行（见下）。
 
-### 相对上游的八项改动
+### 相对上游的九项改动
 
 | # | 改动 | 配置键 / 位置 |
 |---|------|---------------|
@@ -30,6 +30,30 @@
 | 6 | **文件权限**：`afc init` 写出的 `config.toml` 为 `0600`（目录 `0700`）；`state.json` 与 `/config set --persist` 回写也以 `0600` 写入。 | `src/cli.ts`、`src/persistence/state-store.ts`、`src/config.ts` |
 | 8 | **失败轮次不再拖垮进程**：一次失败的 turn 现在只做三件事——记日志、往发起会话里回一条可读的「❌ 本次执行失败：…」、保留会话可用；**进程绝不退出**。provider 未登录（`Not logged in · Please run /login`）会给出可操作提示（去那台机器上跑 `claude` 然后 `/login`；provider=codex 则是 `codex login`）。`process.on("unhandledRejection")` 改为 fatal 记录但**不退出**（`uncaughtException` 仍退出）。同时 `message_id` 去重改为落盘（`state.json` 内最近 200 条、按 1 小时老化），使重启后 Lark 重投的同一事件不会被重复处理。 | `src/agent/turn-failure.ts`、`src/util/dedup.ts`、`src/claude/session.ts`、`src/index.ts` |
 | 7 | **共享群 @提及 路由**：三个 bot 同处一个 Lark 群。新增 `access.require_mention`（默认 `true`）：群聊消息必须 @ 到本 bot（`mentions[].id.open_id` == 本 bot 的 `open_id`，启动时经 `GET /open-apis/bot/v3/info` 解析并缓存）才处理，解析失败则群聊 fail closed；单聊不受影响。同时丢弃 `sender_type != "user"` 的事件（bot 不互相触发），并在进命令路由前剥掉 `@_user_N` / `@_all` 占位符。 | `[access].require_mention`、`src/feishu/mentions.ts`、`src/feishu/gateway.ts` |
+| 9 | **有作用域的免卡片放行（治审批疲劳）**：线上一次 Lark 对话产生 81 张权限卡片（51 `Bash` / 29 `Read` / 1 `Skill`），人类点了 97 次「一律同意」——点到第 97 次的人不在审阅任何一张卡片。新增 `access.auto_approve_readonly`（默认 `true`）：只读工具（`Read`/`Glob`/`Grep`/`LS`/`NotebookRead`，以及无路径的 `TodoWrite`）在输入里每一个路径都落在会话 cwd 子树内时直接放行（`~` 先展开，`fs.realpath` 解析，软链接逃逸算越界）。新增 `access.honor_project_permissions`（默认 `true`）：`Bash` 先查项目自己的 `<cwd>/.claude/settings.json`（向上合并到 git 根或 `agent.default_cwd`，深层优先，按 mtime 缓存）里 `Bash(...)` 形式的 allow / deny 规则，**deny 永远优先**。**改状态与出网的工具永远出卡片**：未命中 allow 的 `Bash`、`Write`、`Edit`、`MultiEdit`、`NotebookEdit`、`WebFetch`、`WebSearch`、`Task`、`Skill`，以及任何 `mcp__` 前缀工具。每次放行打 info 日志（`reason` = `readonly-in-cwd` / `project-allow-rule:<规则>`），`/status` 显示本会话累计放行次数。 | `[access].auto_approve_readonly`、`[access].honor_project_permissions`、`src/claude/auto-approve.ts` |
+
+### 免卡片放行决策表（第 9 项）
+
+`canUseTool` 收到的每一次工具调用，按下表从上往下判定，第一条命中即生效：
+
+| 工具 | 条件 | 结果 |
+|------|------|------|
+| `mcp__feishu__*` | 桥接自己注入的 in-process shim（`ask_user`） | 直接放行（本分支既有行为，与本项无关） |
+| 任何 `mcp__*` | —— | **卡片**，`auto_approve_readonly` / `honor_project_permissions` 都管不着 |
+| `Write` / `Edit` / `MultiEdit` / `NotebookEdit` / `WebFetch` / `WebSearch` / `Task` / `Skill` | —— | **卡片**，同上 |
+| `Bash` | `honor_project_permissions = false` | **卡片** |
+| `Bash` | 命令含 `` ` `` / `$` / `>` / `<` / 换行 / 裸 `&` | **卡片**（不做解析，fail closed） |
+| `Bash` | 整条命令或任一分段命中 deny 规则 | **卡片**（deny 永远优先，即使 allow 也命中） |
+| `Bash` | `&&` `\|\|` `;` `\|` 拆开后**每一段**都命中 allow 规则 | 放行，`reason = project-allow-rule:<规则>` |
+| `Bash` | 其它（含没有 / 读不出 `.claude/settings.json`） | **卡片** |
+| `TodoWrite` | `auto_approve_readonly = true` | 放行，`reason = readonly-in-cwd` |
+| `Read` / `Glob` / `Grep` / `LS` / `NotebookRead` | `auto_approve_readonly = true` 且输入里每个路径都在会话 cwd 子树内 | 放行，`reason = readonly-in-cwd` |
+| `Read` / `Glob` / `Grep` / `LS` / `NotebookRead` | 任一路径越界（`~/.ssh/id_rsa`、`../../other-repo`、软链接逃逸） | **卡片** |
+| 其它任何工具名 | —— | **卡片** |
+
+判定过程中任何异常（fs 报错、JSON 损坏、输入形状不对）都落到**卡片**，
+不会放行。这比现状更安全：今天 `Read ~/.ssh` 也会出卡片，但那是 97 张里的
+一张，没人会看见它；现在它是那一小把真正需要人点的卡片之一。
 
 ### 共享群模型（三个 bot 一个群）
 

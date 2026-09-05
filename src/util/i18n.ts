@@ -130,6 +130,8 @@ const STRINGS = {
     statusInputTokens: (v: number) => `输入 Token 合计：${v}`,
     statusOutputTokens: (v: number) => `输出 Token 合计：${v}`,
     statusQueueLen: (v: number) => `队列长度：${v}`,
+    statusAutoApproved: (v: number) =>
+      `已免卡片放行：${v} 次（只含 cwd 内只读工具 / 项目 allow 规则，详见日志）`,
     configShowHeader: "当前配置：",
     configUnsupported: (key: string, valid: string) =>
       `不支持的配置项: ${key}\n可设置的配置项: ${valid}`,
@@ -320,6 +322,8 @@ const STRINGS = {
     statusInputTokens: (v: number) => `Total input tokens: ${v}`,
     statusOutputTokens: (v: number) => `Total output tokens: ${v}`,
     statusQueueLen: (v: number) => `Queue length: ${v}`,
+    statusAutoApproved: (v: number) =>
+      `Auto-approved without a card: ${v} (read-only in cwd / project allow rules; see logs)`,
     configShowHeader: "Current config:",
     configUnsupported: (key: string, valid: string) =>
       `Unknown config key: ${key}\nSettable keys: ${valid}`,

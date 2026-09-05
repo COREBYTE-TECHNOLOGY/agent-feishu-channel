@@ -62,6 +62,47 @@ allowed_chat_ids = [
 # 本开关就成了唯一防线，而权限本身也远超所需。
 require_mention = true
 
+# COREBYTE 加固（审批疲劳）：有作用域的免卡片放行。
+#
+# 背景：本桥接给 Claude Agent SDK 传了 canUseTool 回调，于是 **每一个** 工具
+# 调用都会走权限卡片——包括原生 Claude Code 从不询问的只读工具。线上一次
+# Lark 对话产生了 81 张卡片（51 Bash / 29 Read / 1 Skill），人类点了 97 次
+# 「一律同意」。点到第 97 次的人不可能在审阅任何一张卡片，这比一个范围收紧、
+# 有日志可审计的自动放行更不安全。
+#
+# true（默认）= 只读工具（Read / Glob / Grep / LS / NotebookRead，以及无路径的
+# TodoWrite）在 **输入里每一个文件系统路径都落在当前会话 cwd 子树内** 时直接
+# 放行，不出卡片。路径判定先展开 `~`，再用 fs.realpath 解析（软链接逃逸算逃
+# 逸），路径不存在时退回 path.resolve。任何越界路径（~/.ssh/id_rsa、
+# ../../other-repo、指向外面的软链接）照常出卡片。
+auto_approve_readonly = true
+
+# true（默认）= Bash 命令先查项目自己的 `<cwd>/.claude/settings.json`
+# （向上合并到 git 根或 agent.default_cwd 为止，深层文件优先；按 mtime 缓存），
+# 应用其中 permissions.deny 与 permissions.allow 里 `Bash(...)` 形式的规则：
+#   Bash(make lint)     精确匹配
+#   Bash(git status*)   前缀匹配
+#   Bash(git status:*)  Claude Code 原生前缀形式
+# 其它规则类型（Read(...)、WebFetch(...) 等）一律跳过，只在 debug 日志里
+# 统计「识别 N 条 / 跳过 M 条」。**deny 永远优先**：即使 allow 也命中，也回落
+# 到卡片。带命令替换、重定向、换行或后台 `&` 的命令一律不放行；`&&` / `||` /
+# `;` / `|` 串起来的命令要求 **每一段** 都被 allow 命中，`git status && rm -rf /`
+# 不会蹭到 `Bash(git status*)` 上。没命中 → 照常出卡片。
+#
+# 为什么这份文件可以当白名单：它提交在产品仓库里、受 CODEOWNERS 双人评审，
+# 每一条规则都已经被第二个人读过——是**评审过的**白名单，不是临时白名单。
+# 文件缺失或 JSON 损坏时按「没有任何规则」处理，即全部出卡片（fail closed）。
+honor_project_permissions = true
+
+# 无论以上两个开关怎么设，下列工具**永远出卡片**，绝不自动放行：
+#   Bash（未被 allow 规则命中的）、Write、Edit、MultiEdit、NotebookEdit、
+#   WebFetch、WebSearch、Task、Skill，以及任何 mcp__ 开头的工具。
+# 也就是说：改状态的、出网的，一律人工点。
+# 每一次免卡片放行都会打一条 info 日志
+# （`canUseTool: auto-approved without card`，带 tool_name 与 reason
+# `readonly-in-cwd` / `project-allow-rule:<规则>`），`/status` 也会显示本会话
+# 累计放行次数，便于事后审计。
+
 # ─── Agent defaults ──────────────────────────────────────────────────
 [agent]
 # Which provider new sessions should use by default.

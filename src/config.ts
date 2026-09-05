@@ -34,6 +34,15 @@ const AccessSchema = z.object({
   // them. Default true: in a group chat the bridge only handles messages
   // that @mention its own bot. p2p chats are never gated.
   require_mention: z.boolean().default(true),
+  // COREBYTE hardening (approval fatigue): read-only tools whose every
+  // filesystem path resolves inside the session cwd resolve without a
+  // permission card. State-changing and network tools always card.
+  auto_approve_readonly: z.boolean().default(true),
+  // COREBYTE hardening (approval fatigue): consult the project's own
+  // `.claude/settings.json` `permissions.allow` / `permissions.deny`
+  // for Bash commands. That file is committed and CODEOWNERS-reviewed,
+  // so it is a reviewed allowlist rather than an ad-hoc one.
+  honor_project_permissions: z.boolean().default(true),
 });
 
 // COREBYTE hardening: `bypassPermissions` removed on purpose — a config that
@@ -368,6 +377,8 @@ export async function loadConfig(path: string): Promise<AppConfig> {
       allowedChatIds: data.access.allowed_chat_ids,
       unauthorizedBehavior: data.access.unauthorized_behavior,
       requireMention: data.access.require_mention,
+      autoApproveReadonly: data.access.auto_approve_readonly,
+      honorProjectPermissions: data.access.honor_project_permissions,
     },
     agent: {
       defaultProvider: agent.default_provider,
