@@ -33,7 +33,11 @@ function unescapeEntities(s: string): string {
   return s.replace(/&(?:lt|gt|amp|quot|#39);/g, (m) => ENTITY_MAP[m] ?? m);
 }
 
-function renderElement(el: PostElement, imageKeys: string[]): string {
+function renderElement(
+  el: PostElement,
+  imageKeys: string[],
+  ownMentionIds: ReadonlySet<string>,
+): string {
   switch (el.tag) {
     case "text": {
       const text = el.text ?? "";
@@ -42,6 +46,10 @@ function renderElement(el: PostElement, imageKeys: string[]): string {
     case "a":
       return `${el.text ?? ""} (${el.href ?? ""})`;
     case "at":
+      // Remove only a structural mention whose identity was resolved to
+      // this bot. Never strip a display name or ordinary body text.
+      // A space prevents removal from concatenating two command fragments.
+      if (el.user_id && ownMentionIds.has(el.user_id)) return " ";
       return `@${el.user_name ?? el.user_id ?? "user"}`;
     case "emotion":
       return `:${el.emoji_type ?? ""}:`;
@@ -62,7 +70,10 @@ function renderElement(el: PostElement, imageKeys: string[]): string {
  * an ordered list of inline image_keys. Throws on malformed JSON or
  * when the envelope lacks a content array.
  */
-export function parsePost(rawContent: string): ParsedPost {
+export function parsePost(
+  rawContent: string,
+  ownMentionIds: ReadonlySet<string> = new Set(),
+): ParsedPost {
   const envelope = JSON.parse(rawContent) as PostEnvelope;
   if (!Array.isArray(envelope.content)) {
     throw new Error("parsePost: `content` is not an array");
@@ -81,7 +92,7 @@ export function parsePost(rawContent: string): ParsedPost {
       throw new Error("parsePost: paragraph is not an array");
     }
     const rendered = (paragraph as PostElement[])
-      .map((el) => renderElement(el, imageKeys))
+      .map((el) => renderElement(el, imageKeys, ownMentionIds))
       .join("");
     if (rendered.length > 0) {
       paragraphs.push(rendered);

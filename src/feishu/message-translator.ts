@@ -20,6 +20,7 @@ export async function translateReceiveEvent(
   event: ReceiveV1Event,
   client: FeishuImageClient,
   log: Logger,
+  ownBotOpenId?: string,
 ): Promise<IncomingMessage | null> {
   const msgType = event.message.message_type;
   let text = "";
@@ -57,7 +58,20 @@ export async function translateReceiveEvent(
   } else if (msgType === "post") {
     let parsed: ParsedPost;
     try {
-      parsed = parsePost(event.message.content);
+      // Rich-text posts carry structural `at` nodes, unlike plain-text
+      // placeholders. Resolve aliases only from metadata tied to OUR open_id;
+      // a matching display name alone is not sufficient to strip a mention.
+      const ownMentionIds = new Set<string>();
+      if (ownBotOpenId) {
+        ownMentionIds.add(ownBotOpenId);
+        for (const mention of event.message.mentions ?? []) {
+          if (mention.id?.open_id !== ownBotOpenId) continue;
+          for (const id of [mention.key, mention.id.user_id, mention.id.union_id]) {
+            if (id) ownMentionIds.add(id);
+          }
+        }
+      }
+      parsed = parsePost(event.message.content, ownMentionIds);
     } catch (err) {
       log.error({ err }, "Failed to parse post message content");
       return null;

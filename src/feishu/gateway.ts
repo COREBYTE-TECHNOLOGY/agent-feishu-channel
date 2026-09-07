@@ -214,7 +214,9 @@ export class FeishuGateway {
       return;
     }
 
-    const incoming = await translateReceiveEvent(event, this.feishuClient, log);
+    const incoming = await translateReceiveEvent(
+      event, this.feishuClient, log, this.botIdentity?.openId,
+    );
     if (incoming === null) return;
 
     try {
