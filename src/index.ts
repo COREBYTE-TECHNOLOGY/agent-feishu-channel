@@ -47,6 +47,7 @@ import { formatTurnFailure } from "./agent/turn-failure.js";
 import { PersistentDedup } from "./util/dedup.js";
 import type { IncomingMessage } from "./types.js";
 import { detectLocale, t } from "./util/i18n.js";
+import type { WorkJournal, WorkRun } from "./audit/work-journal.js";
 
 function resolveConfigPath(override?: string): string {
   if (override) return override;
@@ -56,7 +57,7 @@ function resolveConfigPath(override?: string): string {
   return join(homedir(), ".agent-feishu-channel", "config.toml");
 }
 
-export async function main(configPathOverride?: string): Promise<void> {
+export async function main(configPathOverride?: string, workJournal?: WorkJournal): Promise<void> {
   const configPath = resolveConfigPath(configPathOverride);
 
   let config;
@@ -221,6 +222,18 @@ export async function main(configPathOverride?: string): Promise<void> {
     logger.info({ chat_id: msg.chatId, len: msg.text.length }, "Message received");
     const locale = detectLocale(msg.text);
     const session = sessionManager.getOrCreate(msg.chatId);
+    let workRun: WorkRun | undefined;
+    const finishWork = async (status: "completed" | "cancelled" | "failed", error?: string): Promise<void> => {
+      if (!workRun) return;
+      try {
+        workRun.finish(status, error);
+        await feishuClient.replyText(msg.messageId, await workRun.syncNotice());
+      } catch {
+        // Never expose raw storage or GitHub errors (may include payloads).
+        logger.error("Work journal persistence or notification failed");
+        try { await feishuClient.replyText(msg.messageId, "工作记录同步异常，请先在 GitHub 核对本次记录，不要视为已同步。"); } catch { /* channel unavailable */ }
+      }
+    };
 
     // Per-turn render state. The user sees at most one status card,
     // one thinking card, one tool activity card, and one final answer
@@ -376,6 +389,7 @@ export async function main(configPathOverride?: string): Promise<void> {
     };
 
     const emit = async (event: RenderEvent): Promise<void> => {
+      workRun?.event(event);
       switch (event.type) {
         case "text":
           // Accumulate text blocks rather than sending each one
@@ -795,6 +809,14 @@ export async function main(configPathOverride?: string): Promise<void> {
         });
         return;
       }
+      if (workJournal) {
+        const run = workJournal.begin(msg, session.getStatus().cwd);
+        if (run === null) {
+          await feishuClient.replyText(msg.messageId, "此消息已有持久化工作记录，为避免重复执行，本次不再运行；请查看 GitHub 工作日志。");
+          return;
+        }
+        workRun = run;
+      }
       const outcome = await session.submit(
         {
           ...parsed,
@@ -853,17 +875,20 @@ export async function main(configPathOverride?: string): Promise<void> {
               { chat_id: msg.chatId, reason: failure.err.reason },
               "turn interrupted by user",
             );
+            await finishWork("cancelled", "用户停止或新指令中断；未完成内容请查看已记录动作，不自动重跑。");
             return;
           }
           throw failure.err;
         }
       }
+      if (turnSettled !== null) await finishWork("completed");
       // kind === "rejected" (stop synthesized via submit) → nothing to do.
     } catch (err) {
       // A failed turn is reported, never fatal: log it, tell the human
       // in the chat they were waiting in, and leave the session (and the
       // process) alive and ready for the next message.
       logger.error({ err, chat_id: msg.chatId }, "Claude turn failed");
+      await finishWork("failed", err instanceof Error ? err.message : "执行异常，需核实");
       try {
         await feishuClient.replyText(
           msg.messageId,
@@ -1049,6 +1074,7 @@ export async function main(configPathOverride?: string): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     logger.info({ signal }, "Shutting down");
+    try { await workJournal?.close(); } catch { logger.error("Work journal close failed"); }
     try {
       await sessionManager.flushPendingSave();
       const finalState: State = {
