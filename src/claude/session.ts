@@ -25,7 +25,7 @@ import type { SupportedImageMime } from "../feishu/image-mime.js";
 
 /**
  * Error rejected on a QueuedInput's `done` promise when its turn was
- * dropped before it ran (either by `/stop` or by a `!` prefix). The
+ * cancelled while running or dropped before it ran (`/stop` or `!`). The
  * `reason` field matches the RenderEvent `interrupted` variant so
  * dispatchers can render both consistently.
  */
@@ -183,6 +183,12 @@ interface QueuedInput {
   readonly seq: number;
   /** Display language detected from the user's message text. */
   readonly locale: import("../util/i18n.js").Locale;
+  /** Per-input cancellation, never inherited by a subsequent turn. */
+  interruption?: {
+    reason: "stop" | "bang_prefix";
+    settled: Deferred<boolean>;
+    dispatched: boolean;
+  };
 }
 
 /**
@@ -420,12 +426,19 @@ export class ClaudeSession {
     const toDrop: QueuedInput[] = [];
     let toInterrupt: QueryHandle | null = null;
     let needCancelPending = false;
+    let interruptedInput: QueuedInput | undefined;
 
     await this.mutex.run(async () => {
       while (this.inputQueue.length > 0) {
         toDrop.push(this.inputQueue.shift()!);
       }
       toInterrupt = this.currentTurn?.handle ?? null;
+      if (this.currentTurn) {
+        interruptedInput = this.currentTurn.input;
+        interruptedInput.interruption ??= {
+          reason: "bang_prefix", settled: createDeferred<boolean>(), dispatched: false,
+        };
+      }
       if (this.state === "awaiting_permission") {
         needCancelPending = true;
         this.state = "generating";
@@ -459,15 +472,8 @@ export class ClaudeSession {
       dropped.done.reject(new InterruptedError("bang_prefix"));
     }
 
-    if (toInterrupt !== null) {
-      try {
-        await (toInterrupt as QueryHandle).interrupt();
-      } catch (err) {
-        this.logger.warn(
-          { err },
-          "interrupt_and_run: currentTurn.interrupt() threw",
-        );
-      }
+    if (toInterrupt !== null && interruptedInput) {
+      await this.interruptInput(interruptedInput, toInterrupt);
     }
 
     return { kind: "started", done: entry.done.promise };
@@ -509,10 +515,17 @@ export class ClaudeSession {
     const toDrop: QueuedInput[] = [];
     let toInterrupt: QueryHandle | null = null;
     let needCancelPending = false;
+    let interruptedInput: QueuedInput | undefined;
 
     await this.mutex.run(async () => {
       if (this.state === "idle") return;
       toInterrupt = this.currentTurn?.handle ?? null;
+      if (this.currentTurn) {
+        interruptedInput = this.currentTurn.input;
+        interruptedInput.interruption ??= {
+          reason: "stop", settled: createDeferred<boolean>(), dispatched: false,
+        };
+      }
       if (this.state === "awaiting_permission") {
         needCancelPending = true;
         this.state = "generating";
@@ -544,11 +557,9 @@ export class ClaudeSession {
       dropped.done.reject(new InterruptedError("stop"));
     }
 
-    if (toInterrupt !== null) {
-      try {
-        await (toInterrupt as QueryHandle).interrupt();
-      } catch (err) {
-        this.logger.warn({ err }, "currentTurn.interrupt() threw");
+    if (toInterrupt !== null && interruptedInput) {
+      if (!(await this.interruptInput(interruptedInput, toInterrupt))) {
+        throw new Error("Cancellation failed; the running task may still be active");
       }
     }
 
@@ -560,6 +571,30 @@ export class ClaudeSession {
   }
 
   // --- internals ---
+
+  private async interruptInput(input: QueuedInput, handle: QueryHandle): Promise<boolean> {
+    const request = input.interruption!;
+    if (!request.dispatched) {
+      request.dispatched = true;
+      try {
+        await handle.interrupt();
+        request.settled.resolve(true);
+      } catch (err) {
+        // Allow a later /stop to retry. A failed interrupt must not turn a
+        // genuine provider failure into an apparent successful cancellation.
+        if (input.interruption === request) delete input.interruption;
+        request.settled.resolve(false);
+        this.logger.warn({ err }, "currentTurn.interrupt() threw");
+      }
+    }
+    return request.settled.promise;
+  }
+
+  private async cancellationError(input: QueuedInput): Promise<InterruptedError | null> {
+    const request = input.interruption;
+    if (request && await request.settled.promise) return new InterruptedError(request.reason);
+    return null;
+  }
 
   private async processLoop(): Promise<void> {
     while (true) {
@@ -629,11 +664,15 @@ export class ClaudeSession {
       try {
         await this.runTurn(next, handle);
       } catch (err) {
+        const cancellation = await this.cancellationError(next);
         // When the accumulated conversation context exceeds 50 MB the
         // Claude API rejects the request outright. Detect this, drop
         // the session id (so the next attempt starts a fresh context),
         // notify the user, and retry the same input once.
-        if (this.isRequestTooLargeError(err) && this.claudeSessionId !== undefined) {
+        if (cancellation) {
+          turnError = cancellation;
+          this.logger.info({ seq: next.seq, reason: cancellation.reason }, "Active turn cancelled by user");
+        } else if (this.isRequestTooLargeError(err) && this.claudeSessionId !== undefined) {
           this.logger.warn(
             { err, seq: next.seq, old_session_id: this.claudeSessionId },
             "Request too large — resetting session and retrying",
@@ -645,35 +684,42 @@ export class ClaudeSession {
             this.logger.warn({ err: emitErr }, "context_reset emit threw");
           }
 
-          // Rebuild handle without resume (fresh session).
-          const retryPrompt = this.buildRuntimeHandoffPrompt(prompt, next, {
-            heading: "Continuation summary for resumed work:",
-            includeRecentContext: false,
-          });
-          const retryHandle = this.queryFn({
-            prompt: retryPrompt,
-            options: {
-              cwd: this.config.defaultCwd,
-              model: this.currentModel(),
-              effort: this.currentEffort(),
-              permissionMode,
-              settingSources: ["user", "project"],
-              mcpServers,
-              disallowedTools: ["AskUserQuestion"],
-              // no resume — start fresh
-            },
-            canUseTool: this.buildCanUseToolClosure(next),
-          });
-          this.currentTurn = { input: next, handle: retryHandle };
+          // /stop can arrive while the context-reset notification is in
+          // flight. Never start another provider call after acknowledging it.
+          const resetCancellation = await this.cancellationError(next);
+          if (resetCancellation) {
+            turnError = resetCancellation;
+          } else {
+            // Rebuild handle without resume (fresh session).
+            const retryPrompt = this.buildRuntimeHandoffPrompt(prompt, next, {
+              heading: "Continuation summary for resumed work:",
+              includeRecentContext: false,
+            });
+            const retryHandle = this.queryFn({
+              prompt: retryPrompt,
+              options: {
+                cwd: this.config.defaultCwd,
+                model: this.currentModel(),
+                effort: this.currentEffort(),
+                permissionMode,
+                settingSources: ["user", "project"],
+                mcpServers,
+                disallowedTools: ["AskUserQuestion"],
+                // no resume — start fresh
+              },
+              canUseTool: this.buildCanUseToolClosure(next),
+            });
+            this.currentTurn = { input: next, handle: retryHandle };
 
-          try {
-            await this.runTurn(next, retryHandle);
-          } catch (retryErr) {
-            this.logger.error(
-              { err: retryErr, seq: next.seq },
-              "Retry after context reset also failed",
-            );
-            turnError = retryErr;
+            try {
+              await this.runTurn(next, retryHandle);
+            } catch (retryErr) {
+              const retryCancellation = await this.cancellationError(next);
+              if (!retryCancellation) {
+                this.logger.error({ err: retryErr, seq: next.seq }, "Retry after context reset also failed");
+              }
+              turnError = retryCancellation ?? retryErr;
+            }
           }
         } else {
           this.logger.error(
@@ -933,12 +979,14 @@ export class ClaudeSession {
       `${this.currentProviderLabel()} turn start`,
     );
     let resultMsg: SDKMessageLike | undefined;
-
-    for await (const msg of handle.messages) {
+    const buffered: SDKMessageLike[] = [];
+    const captureSession = (msg: SDKMessageLike): void => {
       if (msg.session_id && !this.claudeSessionId) {
         this.setProviderSessionId(msg.session_id);
         this.onSessionIdCaptured?.();
       }
+    };
+    const renderNonResult = async (msg: SDKMessageLike): Promise<void> => {
       if (msg.type === "assistant" && msg.message?.content) {
         for (const block of msg.message.content) {
           await this.emitAssistantBlock(block, input.emit);
@@ -954,11 +1002,31 @@ export class ClaudeSession {
             });
           }
         }
-      } else if (msg.type === "result") {
-        resultMsg = msg;
       }
+    };
+    const replayBuffered = async (): Promise<void> => {
+      for (const msg of buffered.splice(0)) {
+        captureSession(msg);
+        if (msg.type === "result") resultMsg = msg;
+        else await renderNonResult(msg);
+      }
+    };
+    for await (const msg of handle.messages) {
+      // Drain without waiting: some transports resolve interrupt only after
+      // iteration ends. Preserve pending output if interrupt itself fails.
+      if (input.interruption) {
+        buffered.push(msg);
+        continue;
+      }
+      if (buffered.length > 0) await replayBuffered();
+      captureSession(msg);
+      if (msg.type === "result") resultMsg = msg;
+      else await renderNonResult(msg);
     }
 
+    const cancellation = await this.cancellationError(input);
+    if (cancellation) throw cancellation;
+    if (buffered.length > 0) await replayBuffered();
     if (resultMsg === undefined) {
       throw new Error(`${this.currentProviderLabel()} turn ended without a result message`);
     }

@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   ClaudeSession,
+  InterruptedError,
   type ClaudeSessionOptions,
 } from "../../../src/claude/session.js";
 import { FakeQueryHandle } from "./fakes/fake-query-handle.js";
@@ -35,14 +36,17 @@ interface Harness {
  * FakeQueryHandle per invocation. Tests grab successive fakes out of
  * `harness.fakes[i]` to drive each turn.
  */
-function makeHarness(overrides?: { onSessionIdCaptured?: () => void }): Harness {
+function makeHarness(overrides?: {
+  onSessionIdCaptured?: () => void;
+  wrapHandle?: (fake: FakeQueryHandle) => QueryHandle;
+}): Harness {
   const fakes: FakeQueryHandle[] = [];
   const queryFn: QueryFn = (params) => {
     const fake = new FakeQueryHandle();
     fake.canUseTool = params.canUseTool;
     fake.options = params.options;
     fakes.push(fake);
-    return fake as QueryHandle;
+    return overrides?.wrapHandle?.(fake) ?? fake as QueryHandle;
   };
   const clock = new FakeClock();
   const questionBroker = new FakeQuestionBroker();
@@ -514,7 +518,9 @@ describe("ClaudeSession — /stop", () => {
     await expect(second.done).rejects.toThrow(/stop|interrupted/i);
 
     // Turn 1 ends abnormally → first.done rejects.
-    await expect(first.done).rejects.toThrow();
+    await expect(first.done).rejects.toBeInstanceOf(InterruptedError);
+    await expect(first.done).rejects.toMatchObject({ reason: "stop" });
+    expect(spy1.events.some(event => event.type === "turn_end")).toBe(false);
 
     // After the in-flight turn's iterator drains, state returns to idle.
     await flushMicrotasks();
@@ -604,6 +610,185 @@ describe("ClaudeSession — /stop", () => {
     });
     await second.done;
     expect(h.session._testGetState()).toBe("idle");
+  });
+});
+
+describe("active cancellation outcome regression (corebyte #50)", () => {
+  const input = {
+    kind: "run" as const, text: "sleep", senderOpenId: "ou_test",
+    parentMessageId: "om_test", locale: "zh" as const,
+  };
+
+  it.each(["stop", "bang_prefix"] as const)("classifies %s while an iterator throws AbortError", async (reason) => {
+    const h = makeHarness({ wrapHandle: fake => ({
+      messages: { async *[Symbol.asyncIterator]() {
+        for await (const msg of fake.messages) yield msg;
+        if (fake.interrupted) throw new DOMException("aborted", "AbortError");
+      } },
+      interrupt: () => fake.interrupt(),
+      setPermissionMode: mode => fake.setPermissionMode(mode),
+    }) });
+    h.session.setProvider("codex");
+    const spy = new SpyRenderer();
+    const first = await h.session.submit(input, spy.emit);
+    if (first.kind !== "started") throw new Error("expected started");
+    const settled = first.done.catch(error => error);
+    await flushMicrotasks();
+    let replacement;
+    if (reason === "stop") await h.session.stop(new SpyRenderer().emit);
+    else replacement = await h.session.submit({ ...input, kind: "interrupt_and_run", text: "replacement" }, new SpyRenderer().emit);
+    expect(await settled).toBeInstanceOf(InterruptedError);
+    expect(await settled).toMatchObject({ reason });
+    expect(spy.events.some(event => event.type === "turn_end")).toBe(false);
+    // Subsequent input must not inherit the old input's cancellation.
+    const nextSpy = new SpyRenderer();
+    const next = replacement ?? await h.session.submit({ ...input, text: "next" }, nextSpy.emit);
+    if (next.kind !== "started") throw new Error("expected started");
+    await flushMicrotasks();
+    expect(h.fakes).toHaveLength(2);
+    h.fakes[1]!.finishWithSuccess({ durationMs: 1, inputTokens: 1, outputTokens: 1 });
+    await next.done;
+    expect(h.session.getStatus().turnCount).toBe(1);
+  });
+
+  it("does not hide unrequested early EOF or AbortError", async () => {
+    for (const error of [undefined, new DOMException("unrequested abort", "AbortError")]) {
+      const h = makeHarness({ wrapHandle: fake => ({
+        messages: { async *[Symbol.asyncIterator]() { if (error) throw error; } },
+        interrupt: () => fake.interrupt(), setPermissionMode: () => {},
+      }) });
+      h.session.setProvider("codex");
+      const result = await h.session.submit(input, new SpyRenderer().emit);
+      if (result.kind !== "started") throw new Error("expected started");
+      const failure = await result.done.catch(err => err);
+      expect(failure).toBeInstanceOf(Error);
+      expect(failure).not.toBeInstanceOf(InterruptedError);
+      if (error) expect(failure).toBe(error);
+      else expect(failure.message).toMatch(/without a result/);
+    }
+  });
+
+  it("does not retry a context-too-large error after cancellation", async () => {
+    const h = makeHarness({ wrapHandle: fake => ({
+      messages: { async *[Symbol.asyncIterator]() {
+        for await (const msg of fake.messages) yield msg;
+        throw new Error("Request too large: exceeds 50 MB");
+      } },
+      interrupt: () => fake.interrupt(), setPermissionMode: () => {},
+    }) });
+    h.session.setProviderSessionId("test-session");
+    const result = await h.session.submit(input, new SpyRenderer().emit);
+    if (result.kind !== "started") throw new Error("expected started");
+    const settled = result.done.catch(err => err);
+    await flushMicrotasks();
+    await h.session.stop(new SpyRenderer().emit);
+    expect(await settled).toBeInstanceOf(InterruptedError);
+    expect(h.fakes).toHaveLength(1);
+  });
+
+  it("suppresses buffered text/result after stop and does not count a successful turn", async () => {
+    const h = makeHarness({ wrapHandle: fake => ({
+      messages: fake.messages,
+      interrupt: async () => {
+        fake.emitMessage({ type: "assistant", message: { content: [{ type: "text", text: "WAIT_DONE" }] } });
+        fake.finishWithSuccess({ durationMs: 1, inputTokens: 1, outputTokens: 1 });
+      },
+      setPermissionMode: () => {},
+    }) });
+    const spy = new SpyRenderer();
+    const result = await h.session.submit(input, spy.emit);
+    if (result.kind !== "started") throw new Error("expected started");
+    const settled = result.done.catch(err => err);
+    await flushMicrotasks();
+    await h.session.stop(new SpyRenderer().emit);
+    expect(await settled).toBeInstanceOf(InterruptedError);
+    expect(spy.events).toEqual([]);
+    expect(h.session.getStatus().turnCount).toBe(0);
+  });
+
+  it("failed interrupt does not acknowledge stopped or contaminate a later successful completion", async () => {
+    const h = makeHarness({ wrapHandle: fake => ({
+      messages: fake.messages,
+      interrupt: async () => { throw new Error("interrupt failed"); },
+      setPermissionMode: () => {},
+    }) });
+    const spy = new SpyRenderer();
+    const stopSpy = new SpyRenderer();
+    const result = await h.session.submit(input, spy.emit);
+    if (result.kind !== "started") throw new Error("expected started");
+    await flushMicrotasks();
+    await expect(h.session.stop(stopSpy.emit)).rejects.toThrow(/Cancellation failed/);
+    expect(stopSpy.events).toEqual([]);
+    h.fakes[0]!.finishWithSuccess({ durationMs: 1, inputTokens: 1, outputTokens: 1 });
+    await result.done;
+    expect(h.session.getStatus().turnCount).toBe(1);
+  });
+
+  it("preserves buffered output when interrupt fails after the provider finishes", async () => {
+    let rejectInterrupt!: (error: Error) => void;
+    const interruptPending = new Promise<void>((_, reject) => { rejectInterrupt = reject; });
+    const h = makeHarness({ wrapHandle: fake => ({
+      messages: fake.messages,
+      interrupt: async () => {
+        fake.emitMessage({ type: "assistant", message: { content: [{ type: "text", text: "NORMAL_RESULT" }] } });
+        fake.finishWithSuccess({ durationMs: 1, inputTokens: 1, outputTokens: 1 });
+        await interruptPending;
+      },
+      setPermissionMode: () => {},
+    }) });
+    const spy = new SpyRenderer();
+    const stopSpy = new SpyRenderer();
+    const result = await h.session.submit(input, spy.emit);
+    if (result.kind !== "started") throw new Error("expected started");
+    await flushMicrotasks();
+    const stop = h.session.stop(stopSpy.emit).catch(error => error);
+    await flushMicrotasks();
+    expect(spy.events).toEqual([]);
+    rejectInterrupt(new Error("late interrupt failure"));
+    expect(await stop).toMatchObject({ message: expect.stringMatching(/Cancellation failed/) });
+    await result.done;
+    expect(stopSpy.events).toEqual([]);
+    expect(spy.events).toContainEqual({ type: "text", text: "NORMAL_RESULT" });
+    expect(spy.events.some(event => event.type === "turn_end")).toBe(true);
+    expect(h.session.getStatus().turnCount).toBe(1);
+  });
+
+  it("does not start a retry when stop arrives during the context-reset notification", async () => {
+    let releaseReset!: () => void;
+    let resetStarted!: () => void;
+    const resetPending = new Promise<void>(resolve => { releaseReset = resolve; });
+    const resetObserved = new Promise<void>(resolve => { resetStarted = resolve; });
+    const h = makeHarness({ wrapHandle: fake => ({
+      messages: { async *[Symbol.asyncIterator]() { throw new Error("Request too large: exceeds 50 MB"); } },
+      interrupt: () => fake.interrupt(), setPermissionMode: () => {},
+    }) });
+    h.session.setProviderSessionId("test-session");
+    const result = await h.session.submit(input, async event => {
+      if (event.type === "context_reset") { resetStarted(); await resetPending; }
+    });
+    if (result.kind !== "started") throw new Error("expected started");
+    const settled = result.done.catch(error => error);
+    await resetObserved;
+    await h.session.stop(new SpyRenderer().emit);
+    releaseReset();
+    expect(await settled).toBeInstanceOf(InterruptedError);
+    expect(h.fakes).toHaveLength(1);
+  });
+
+  it("dispatches one interrupt for concurrent stop requests", async () => {
+    let calls = 0;
+    const h = makeHarness({ wrapHandle: fake => ({
+      messages: fake.messages,
+      interrupt: async () => { calls++; await fake.interrupt(); },
+      setPermissionMode: () => {},
+    }) });
+    const result = await h.session.submit(input, new SpyRenderer().emit);
+    if (result.kind !== "started") throw new Error("expected started");
+    const settled = result.done.catch(error => error);
+    await flushMicrotasks();
+    await Promise.all([h.session.stop(new SpyRenderer().emit), h.session.stop(new SpyRenderer().emit)]);
+    expect(await settled).toBeInstanceOf(InterruptedError);
+    expect(calls).toBe(1);
   });
 });
 
