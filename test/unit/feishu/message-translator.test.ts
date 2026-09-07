@@ -194,3 +194,78 @@ describe("translateReceiveEvent — @mention stripping (COREBYTE hardening)", ()
     expect(result!.text).toBe("/help");
   });
 });
+
+describe("translateReceiveEvent — rich-text stop regression (#47)", () => {
+  const bot = "ou_codex_bot";
+  const mentions = [{
+    key: "@_user_1", id: { open_id: bot, user_id: "bot_user", union_id: "bot_union" },
+    name: "corebyte-codex",
+  }];
+
+  function post(elements: unknown[], withMentions = true): ReceiveV1Event {
+    const event = makeEvent("post", { content: [elements] });
+    if (withMentions) event.message.mentions = mentions;
+    return event;
+  }
+
+  it.each([bot, "@_user_1", "bot_user", "bot_union"])(
+    "routes a structural bot mention (%s) plus code-styled /stop without a model turn",
+    async (userId) => {
+      const event = post([
+        { tag: "at", user_id: userId, user_name: "corebyte-codex" },
+        { tag: "text", text: " /stop", style: ["code"] },
+      ]);
+      const result = await translateReceiveEvent(event, fakeClient({}), SILENT, bot);
+      expect(result!.text).toBe("/stop");
+      expect(parseInput(result!.text)).toEqual({ kind: "stop" });
+    },
+  );
+
+  it("handles a direct own open_id without mention metadata or display name", async () => {
+    const result = await translateReceiveEvent(post([
+      { tag: "at", user_id: bot }, { tag: "text", text: " /STOP  " },
+    ], false), fakeClient({}), SILENT, bot);
+    expect(parseInput(result!.text)).toEqual({ kind: "stop" });
+  });
+
+  it.each([
+    { tag: "at", user_id: "ou_other", user_name: "corebyte-codex" },
+    { tag: "at", user_name: "corebyte-codex" },
+    { tag: "text", text: "@corebyte-codex" },
+  ])("does not promote a name-only or body-text reference into a stop command (%j)", async (element) => {
+    const result = await translateReceiveEvent(post([
+      element, { tag: "text", text: " /stop" },
+    ]), fakeClient({}), SILENT, bot);
+    expect(result!.text).toBe("@corebyte-codex /stop");
+    expect(parseInput(result!.text).kind).toBe("run");
+  });
+
+  it("does not remove a structural mention without a resolved own identity", async () => {
+    const result = await translateReceiveEvent(post([
+      { tag: "at", user_id: bot, user_name: "corebyte-codex" },
+      { tag: "text", text: " /stop" },
+    ]), fakeClient({}), SILENT);
+    expect(parseInput(result!.text).kind).toBe("run");
+  });
+
+  it("keeps other structural mentions, images and body references", async () => {
+    const result = await translateReceiveEvent(post([
+      { tag: "at", user_id: bot },
+      { tag: "text", text: " ask " },
+      { tag: "at", user_id: "ou_simon", user_name: "Simonchen" },
+      { tag: "text", text: " about @corebyte-codex" },
+      { tag: "img", image_key: "img_a" },
+    ]), fakeClient({ img_a: PNG_BYTES }), SILENT, bot);
+    expect(result!.text).toBe("ask @Simonchen about @corebyte-codex");
+    expect(result!.imageDataUris).toHaveLength(1);
+  });
+
+  it("does not concatenate command fragments around an omitted mention", async () => {
+    const result = await translateReceiveEvent(post([
+      { tag: "text", text: "/st" }, { tag: "at", user_id: bot },
+      { tag: "text", text: "op" },
+    ]), fakeClient({}), SILENT, bot);
+    expect(result!.text).toBe("/st op");
+    expect(parseInput(result!.text).kind).not.toBe("stop");
+  });
+});

@@ -11,6 +11,7 @@ import { Domain } from "@larksuiteoapi/node-sdk";
 import type { BotIdentity, FeishuClient } from "../../../src/feishu/client.js";
 import type { ReceiveV1Event } from "../../../src/feishu/types.js";
 import { createLogger } from "../../../src/util/logger.js";
+import { parseInput } from "../../../src/commands/router.js";
 
 const SILENT = createLogger({ level: "error", pretty: false });
 
@@ -497,5 +498,37 @@ describe("toLarkDomain", () => {
   it("maps config values onto the Lark SDK Domain enum", () => {
     expect(toLarkDomain("lark")).toBe(Domain.Lark);
     expect(toLarkDomain("feishu")).toBe(Domain.Feishu);
+  });
+});
+
+describe("FeishuGateway rich-text command routing (#47)", () => {
+  it("passes the resolved bot identity into translation before command dispatch", async () => {
+    const stop = vi.fn(async () => {});
+    const submit = vi.fn(async () => {});
+    const gateway = makeGateway({
+      access: new AccessControl({
+        allowedOpenIds: ["ou_alice"], allowedChatIds: ["oc_test"],
+        unauthorizedBehavior: "ignore",
+      }),
+      feishuClient: { replyText: vi.fn() },
+      requireMention: true,
+      resolveBotIdentity: async () => ({ openId: "ou_codex_bot", appName: "corebyte-codex" }),
+      onMessage: async (msg) => {
+        const parsed = parseInput(msg.text);
+        if (parsed.kind === "stop") await stop();
+        else await submit();
+      },
+    });
+    const event = makeTextEvent("ou_alice");
+    event.message.chat_type = "group";
+    event.message.message_type = "post";
+    event.message.mentions = [{ key: "@_user_1", id: { open_id: "ou_codex_bot" } }];
+    event.message.content = JSON.stringify({ content: [[
+      { tag: "at", user_id: "ou_codex_bot", user_name: "corebyte-codex" },
+      { tag: "text", text: " /stop", style: ["code"] },
+    ]] });
+    await handleReceiveV1(gateway, event);
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(submit).not.toHaveBeenCalled();
   });
 });
