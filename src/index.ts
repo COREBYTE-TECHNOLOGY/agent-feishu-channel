@@ -840,10 +840,15 @@ export async function main(configPathOverride?: string): Promise<void> {
         const failure = await turnSettled;
         if (failure !== null) {
           if (failure.err instanceof InterruptedError) {
-            // The session already emitted the appropriate
-            // "interrupted" notice on the same emit channel — just
-            // log and swallow so the outer catch doesn't surface a
-            // generic error reply.
+            // corebyte #50: the status-card send above has settled, even
+            // if cancellation happened while it was in flight. Finalize
+            // only the started input's cursor; queued inputs have no card
+            // and keep their existing dropped-input notice.
+            if (outcome.kind === "started") {
+              await updateStatus(formatStopAck(locale));
+            }
+            // Cancellation is neither success nor a generic turn error:
+            // do not flush partial text or emit completion/stat messages.
             logger.info(
               { chat_id: msg.chatId, reason: failure.err.reason },
               "turn interrupted by user",
