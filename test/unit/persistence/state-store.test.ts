@@ -145,6 +145,35 @@ describe("StateStore", () => {
     expect(parsed.version).toBe(3);
   });
 
+  it("save() serialises overlapping writes: none rejects, last wins, no tmp left (corebyte #22)", async () => {
+    // Regression for the production ENOENT: dedup flush, SessionManager
+    // and shutdown all called save() concurrently on one fixed `.tmp`.
+    const store = new StateStore(statePath);
+    const writes = Array.from({ length: 100 }, (_, i) =>
+      store.save({ ...EMPTY_STATE, lastCleanShutdown: i % 2 === 0, activeProviders: { [`chat_${i}`]: "claude" } }),
+    );
+    // Interleave the second writer path too (merges the ring into lastState).
+    writes.push(store.saveSeenMessages([{ id: "om_1", ts: 1 }]));
+    await expect(Promise.all(writes)).resolves.toBeDefined();
+    const parsed = JSON.parse(readFileSync(statePath, "utf8"));
+    expect(parsed.activeProviders).toEqual({ chat_99: "claude" });
+    expect(parsed.seenMessages).toEqual([{ id: "om_1", ts: 1 }]);
+    const { readdirSync } = await import("node:fs");
+    expect(readdirSync(tmpDir).filter((f) => f.endsWith(".tmp"))).toEqual([]);
+  });
+
+  it("save() after a failed write still works for later callers", async () => {
+    const store = new StateStore(statePath);
+    const fs = await import("node:fs/promises");
+    // Make the target path a directory so rename() fails once.
+    await fs.mkdir(statePath, { recursive: true });
+    await expect(store.save(EMPTY_STATE)).rejects.toThrow();
+    expect((await fs.readdir(tmpDir)).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+    await fs.rmdir(statePath);
+    await expect(store.save({ ...EMPTY_STATE, lastCleanShutdown: false })).resolves.toBeUndefined();
+    expect(JSON.parse(readFileSync(statePath, "utf8")).lastCleanShutdown).toBe(false);
+  });
+
   it("save() creates parent directory if missing", async () => {
     const nested = join(tmpDir, "nested", "deeper", "state.json");
     const store = new StateStore(nested);
