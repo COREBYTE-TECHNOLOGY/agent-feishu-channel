@@ -168,6 +168,7 @@ describe("StateStore", () => {
     // Make the target path a directory so rename() fails once.
     await fs.mkdir(statePath, { recursive: true });
     await expect(store.save(EMPTY_STATE)).rejects.toThrow();
+    expect((await fs.readdir(tmpDir)).filter((name) => name.endsWith(".tmp"))).toEqual([]);
     await fs.rmdir(statePath);
     await expect(store.save({ ...EMPTY_STATE, lastCleanShutdown: false })).resolves.toBeUndefined();
     expect(JSON.parse(readFileSync(statePath, "utf8")).lastCleanShutdown).toBe(false);

@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { SeenMessage } from "../util/dedup.js";
 
@@ -281,12 +281,20 @@ export class StateStore {
       this.seenMessages.length > 0
         ? { ...state, seenMessages: this.seenMessages }
         : state;
-    // COREBYTE hardening: state.json carries chat/session ids — owner-only.
-    await writeFile(tmp, JSON.stringify(payload, null, 2), {
-      encoding: "utf8",
-      mode: 0o600,
-    });
-    await rename(tmp, this.path);
+    try {
+      // COREBYTE hardening: state.json carries chat/session ids — owner-only.
+      await writeFile(tmp, JSON.stringify(payload, null, 2), {
+        encoding: "utf8",
+        mode: 0o600,
+      });
+      await rename(tmp, this.path);
+    } catch (err) {
+      // corebyte #22: a failed write may leave a partial file, and a
+      // failed rename leaves the complete temp file. Only remove this
+      // attempt's unique path; cleanup must not replace the original error.
+      await rm(tmp, { force: true }).catch(() => undefined);
+      throw err;
+    }
   }
 
   async markUncleanAtStartup(state: State): Promise<void> {
